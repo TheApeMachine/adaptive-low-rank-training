@@ -4,15 +4,15 @@ This repository contains research and experimental code for **Adaptive Low-Rank 
 
 Unlike static compression techniques (like LoRA) or fixed-rank approximations, this approach allows the model to "learn" its own optimal topology. Layers with high information density grow in rank, while redundant layers shrink, automatically allocating parameters where they are most needed.
 
-## 🚀 Latest State: v10 Scaled Spectral Adaptive
+## 🚀 Latest State: v13 Lazy SVD Adaptive
 
-The current state-of-the-art implementation in this project is **`v10_transformer_lowrank_scaled.py`**.
+The current state-of-the-art implementation in this project is **`v13_transformer_lowrank_lazy_svd_adaptive.py`**.
 
-### Key Innovations in v10
-*   **Stable Rank Estimation**: Instead of heuristic gradient clustering, we use **Spectral Theory**. The "intrinsic rank" is estimated via Stable Rank ($ r_{stable} = \|W\|_F^2 / \sigma_{max}^2 $), where $\sigma_{max}$ is approximated using fast Power Iteration.
-*   **Rank Controller**: A sophisticated controller uses Exponential Moving Average (EMA), hysteresis thresholds, and safety factors to prevent rank oscillation and ensure training stability.
-*   **SVD-based Resizing**: When a layer's rank changes, weights are projected into the new subspace using Singular Value Decomposition (SVD), preserving learned knowledge.
-*   **Layer Heterogeneity**: The model naturally evolves heterogeneous ranks (e.g., Attention layers may compress more than FFN layers), validating the "Intrinsic Dimensionality" hypothesis.
+### Key Innovations in v13
+*   **Fixed-Shape, Dynamic Rank**: Unlike previous versions that resized tensors (destroying optimizer state), v13 allocates "maximal" buffers (`U_full`, `V_full`) and slices them during the forward pass (`U_full[:, :rank]`). This **preserves AdamW momentum** throughout training, solving the "re-initialization shock" problem.
+*   **Lazy SVD Scheduling**: SVD is computationally expensive, so it is not run every step. The model waits for a warmup period and then runs SVD checks at intervals.
+*   **Adaptive Intervals**: The time between SVD checks is dynamic. If the layer is "stable" (rank isn't changing), the interval grows (checking less often). If the layer is "unstable" (high tail energy), the interval shrinks to adapt quickly.
+*   **Spectral Energy Targeting**: Ranks are chosen to preserve a specific percentage of spectral energy (default 98%), ensuring that only noise is pruned.
 
 ## 📂 Project Structure & Evolution
 
@@ -20,7 +20,9 @@ The codebase documents the evolution of the research idea:
 
 | Version | Description |
 |---------|-------------|
-| **v10** | **Current Best.** Uses Stable Rank (Spectral) for estimation and SVD for resizing. Implements a robust `RankController`. |
+| **v13** | **Current Best.** Lazy SVD with adaptive intervals. Uses fixed-shape buffers to preserve optimizer momentum. |
+| **v11** | Momentum-based rank adaptation experiments. |
+| **v10** | Scaled Spectral Adaptive. Introduced Stable Rank estimation and SVD resizing (but reset optimizer). |
 | **v8 - v9** | Introduction of Spectral methods and Bidirectional rank adjustment. |
 | **v7** | **Dense Baseline** (`v7_transformer_dense_baseline.py`) and various experiments with EMA and Autograd-based rank adaptation. |
 | **v3 - v6** | Early Adaptive Low-Rank implementations. |
@@ -34,58 +36,48 @@ The project relies on standard PyTorch.
 pip install torch torchvision tqdm
 ```
 
-*Note: `v10` is designed to be hardware-agnostic, automatically selecting CUDA (NVIDIA), MPS (Apple Silicon), or CPU.*
+*Note: The code is designed to be hardware-agnostic, automatically selecting CUDA (NVIDIA), MPS (Apple Silicon), or CPU.*
 
 ## 🏃 Usage
 
 ### 1. Prepare Data
-The v10 script expects a tokenized text file (space-separated tokens). A sample `wiki.train.tokens` is expected in the root, or you can point to your own.
+The scripts expect a text file. The v13 script includes a character-level loader, but you can point it to any text file.
 
 ### 2. Run the Training
-You can run the latest implementation directly or via the `Makefile`.
+You can run the latest implementation directly:
 
-**Directly:**
 ```bash
-python3 v10_transformer_lowrank_scaled.py \
+python3 v13_transformer_lowrank_lazy_svd_adaptive.py \
     --data-file wiki.train.tokens \
-    --log-file v10_log.jsonl \
+    --log-file v13_log.jsonl \
     --epochs 30 \
     --init-rank 64 \
-    --min-rank 8 \
-    --d-model 512
+    --d-model 256 \
+    --n-layers 6 \
+    --n-heads 4
 ```
 
-**Using Makefile:**
-The `Makefile` contains recipes for reproducing various stages of the research:
-```bash
-# Run the latest v10 experiment
-make train
-```
-
-*(Note: You may need to uncomment the specific line in the `Makefile` or run the command manually as shown above.)*
-
-## 📊 Methodology
+## 📊 Methodology (v13)
 
 ### The Algorithm
-1.  **Forward Pass**: Uses Low-Rank decomposition $ W = U V^T $ where $U \in \mathbb{R}^{d_{out} \times r}, V \in \mathbb{R}^{r \times d_{in}}$. Complexity is $O(r(d_{in} + d_{out}))$.
-2.  **Rank Estimation**: Periodically (e.g., every step or epoch), the **Stable Rank** is calculated using a Power Iteration approximation for the top singular value.
-3.  **Controller Decision**:
-    *   Target rank is smoothed via EMA.
-    *   If the target deviates significantly from the current rank (beyond a threshold), a resize is triggered.
-4.  **Resizing**:
-    *   Reconstruct full $W = U V^T$.
-    *   Perform SVD: $W = U' \Sigma V'^T$.
-    *   Truncate to new rank $k$.
-    *   Re-initialize $U, V$ with truncated components.
+1.  **Allocation**: Allocate `U_full` and `V_full` with `max_rank` (e.g., 512). Initialize an integer `rank` pointer (e.g., 64).
+2.  **Forward Pass**: Use slicing: $ W_{active} = U_{full}[:, :rank] \times V_{full}[:rank, :] $. This is efficient and allows gradients to flow only to active components.
+3.  **Lazy Check**: Every $N$ steps (where $N$ is dynamic), compute the SVD of the active weight matrix $W_{active}$ on the CPU.
+4.  **Rank Decision**:
+    *   Calculate the cumulative spectral energy.
+    *   Find the smallest rank $k$ that retains 98% of the energy.
+    *   Smoothly adjust the current `rank` pointer towards $k$ (clamped step size).
+5.  **Interval Adjustment**:
+    *   If "tail energy" (discarded energy) is low, the approximation is good $\to$ increase check interval (save compute).
+    *   If "tail energy" is high, we are losing info $\to$ decrease check interval (adapt faster).
 
 ### Findings
-*   **Phase Transition**: Experiments typically show a "differentiation phase" where ranks adjust rapidly, followed by a stabilization phase where loss drops significantly.
-*   **Optimizer Reset**: Changing parameter shapes invalidates optimizer state (momentum). The current implementation re-initializes the optimizer on rank change, which causes temporary loss spikes but allows for architectural flexibility.
+*   **Stability**: Preserving optimizer state (AdamW buffers) is critical for convergence. Virtual slicing is superior to physical resizing for this reason.
+*   **Efficiency**: SVD on CPU is fast enough if done "lazily" (every 100-1000 steps). It adds negligible overhead to the training loop.
 
 ## 📄 Research Notes
 *   `Adaptive_LowRank_Training_Research.docx.pdf`: Detailed theoretical background.
-*   `v10_review_gemini_3_pro_temp_0.md`: AI-assisted review and analysis of the v10 code.
+*   `v10_review_gemini_3_pro_temp_0.md`: AI-assisted review of the spectral approach.
 
 ## 📜 License
 [MIT](LICENSE)
-

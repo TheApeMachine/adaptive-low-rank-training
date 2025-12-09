@@ -52,15 +52,34 @@ train:
 	
 	# python3 v9_transformer_lowrank_spectral_bidirectional.py --epochs 30 --init-rank 64 --data-file wiki.train.tokens --log-file v9_log.jsonl
 
-	python3 v10_transformer_lowrank_scaled.py \
+	# python3 v10_transformer_lowrank_scaled.py \
+	# 	--data-file wiki.train.tokens \
+	# 	--log-file v10_log.jsonl \
+	# 	--epochs 30 \
+	# 	--init-rank 64 \
+	# 	--d-model 512 \
+	# 	--n-layers 6 \
+	# 	--n-heads 8 \
+	# 	--d-ff 2048 \
+	# 	--block-size 256 \
+	# 	--batch-size 32 \
+	# 	--steps-per-epoch 200
+
+	# python3 v11_transformer_lowrank_momentum.py \
+	# 	--data-file wiki.train.tokens \
+	# 	--log-file v11_log.jsonl \
+	# 	--epochs 30 \
+	# 	--init-rank 64 \
+	# 	--d-model 512 \
+	# 	--n-layers 6 \
+	# 	--n-heads 8 \
+	# 	--d-ff 2048 \
+	# 	--block-size 256 \
+	# 	--batch-size 32 \
+	# 	--steps-per-epoch 200
+
+	python3 v13_transformer_lowrank_lazy_svd_adaptive.py \
 		--data-file wiki.train.tokens \
-		--log-file v10_log.jsonl \
 		--epochs 30 \
 		--init-rank 64 \
-		--d-model 512 \
-		--n-layers 6 \
-		--n-heads 8 \
-		--d-ff 2048 \
-		--block-size 256 \
-		--batch-size 32 \
-		--steps-per-epoch 200
+		--log-file v13_log.jsonl
