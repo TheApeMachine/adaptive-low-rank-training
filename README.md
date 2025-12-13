@@ -1,12 +1,3 @@
-Here is a professional, high-impact `README.md` ready for your repository. It highlights the key findings immediately and makes reproduction simple.
-
-You will need to place two images in your repo for this to look perfect:
-1.  `assets/early_convergence.png` (Screenshot of Figure 1 from your PDF)
-2.  `assets/pareto_curve.png` (Screenshot of Figure 2 from your PDF)
-
-***
-
-```markdown
 # Bottleneck Attention: Hard-Wiring Low-Dimensional Routing
 
 **[Read the Technical Report (PDF)](bottleneck_attention_tech_report.pdf)**
