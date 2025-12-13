@@ -3,7 +3,7 @@
 **[Read the Technical Report (PDF)](bottleneck_attention_tech_report.pdf)**
 
 ### TL;DR
-Transformer attention matrices ($W_Q, W_K$) are massively over-parameterized. We demonstrate that you can **reduce the attention dimension from 512 to 32 (16$\times$ compression)** with only a ~4% increase in perplexity.
+Transformer attention matrices ($W_Q, W_K$) are massively over-parameterized. We demonstrate that you can **reduce the attention dimension from 512 to 32 (16 $\times$ compression)** with only a ~4% increase in perplexity.
 
 This architectural change reduces the **KV-Cache memory footprint by 93.75%**, enabling significantly larger batch sizes and longer contexts during inference.
 
