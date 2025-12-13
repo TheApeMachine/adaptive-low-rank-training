@@ -73,7 +73,7 @@ Bottleneck KV Cache size is $2 \cdot L \cdot T \cdot d_{attn}$.
 | **4k** | ~10 MB | ~0.6 MB | **93%** |
 | **128k** | ~320 MB | ~20 MB | **93%** |
 
-This effectively allows for **16$\times$ longer context** or **16$\times$ larger batch sizes** within the same memory budget for the KV cache.
+This effectively allows for **16 $\times$ longer context** or **16 $\times$ larger batch sizes** within the same memory budget for the KV cache.
 
 ---
 
