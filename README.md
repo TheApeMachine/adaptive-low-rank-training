@@ -1,94 +1,300 @@
-# Bottleneck Attention: Hard-Wiring Low-Dimensional Routing
+# Decoupled Bottleneck Attention
 
-**[Read the Technical Report (PDF)](bottleneck_attention_tech_report.pdf)**
+**Scaling Efficient Transformers via Low-Rank Semantic Routing**
 
-### TL;DR
-Transformer attention matrices ($W_Q, W_K$) are massively over-parameterized. We demonstrate that you can **reduce the attention dimension from 512 to 32 (16 $\times$ compression)** with only a ~4% increase in perplexity.
+[![arXiv](https://img.shields.io/badge/arXiv-2025.XXXXX-b31b1b.svg)](https://arxiv.org/abs/2025.XXXXX)
+[![Paper](https://img.shields.io/badge/PDF-paper.pdf-blue)](paper.pdf)
 
-This architectural change reduces the **KV-Cache memory footprint by 93.75%**, enabling significantly larger batch sizes and longer contexts during inference.
+---
+
+## 🎯 TL;DR
+
+Transformer attention is **5× over-parameterized**. We reduce attention dimension from 512 to 96 and achieve **better perplexity** while enabling **168× KV-cache compression**.
+
+| Model              | Attn Dim | Val Loss | Memory (128k ctx) |
+|:-------------------|:--------:|:--------:|:-----------------:|
+| Standard Baseline  | 512      | 5.37     | 64 GB             |
+| **Bottleneck 96**  | 96       | **5.33** | 1.5 GB            |
+| **Decoupled + Q4** | 32+64    | 5.59     | **0.38 GB**       |
+
+**Key Insight:** *Attention is a router, not a processor.* Semantic routing operates in ~32 dimensions; positional geometry needs ~64. By decoupling them, we slash memory while preserving quality.
 
 ---
 
 ## 📊 Key Results
 
-We trained a 6-layer GPT-style model on WikiText-2 using various attention dimensions ($d_{attn}$). The residual stream ($d_{model}$) remained constant at 512.
+### The "Bottleneck Beats Baseline" Finding
 
-| Model Config | $d_{attn}$ | Params | Compression | Best Val Loss | vs Baseline | Throughput |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Baseline** | 512 | 36.06M | 1.0x | 5.3688 | -- | ~540 tok/s |
-| **Bottleneck** | 128 | 31.34M | 4.0x | 5.4686 | +1.8% | ~600 tok/s |
-| **Extreme + Null** | **32** | **30.16M** | **16.0x** | **5.6070** | **+4.4%** | **~626 tok/s** |
+Surprisingly, constraining attention to 96 dimensions **outperforms** full-rank 512-dim attention:
 
-### The "Early Convergence" Anomaly
-Surprisingly, restricting the attention dimension actually **accelerates early training**. In the first 500 steps, the Bottleneck models (Rank 128 and 32) achieve lower perplexity than the full-rank Baseline, suggesting that the standard 512-dimensional initialization introduces significant optimization noise.
+![Convergence Plot](assets/convergence_plot.png)
 
-![Early Convergence](assets/early_convergence.png)
-*(Figure 1: Validation perplexity vs training step. Note the bottleneck models diving under the baseline in the inset.)*
+### Memory Footprint at 128k Context (Llama-7B Scale)
+
+![Memory Footprint](assets/memory_footprint.png)
 
 ---
 
-## 🧠 The Hypothesis: "Wide Stream, Narrow Router"
-
-Standard Transformers assume $d_{attn} = d_{model}$.
-Our findings suggest this is inefficient. Attention acts as a **routing primitive** (deciding *where* to move information), which is an intrinsically low-rank operation (Rank $\approx$ 11-32). Feature processing, handled by the MLPs, requires high rank.
-
-**Bottleneck Attention** hard-wires this by decoupling the dimensions:
-1.  Project $d_{model} \to d_{attn}$ (where $d_{attn} \ll d_{model}$).
-2.  Compute Attention Scores and Aggregation in $d_{attn}$.
-3.  Project $d_{attn} \to d_{model}$.
-
-**The Null Token:**
-To prevent the "Softmax Bottleneck" in low dimensions, we add a learnable `null` key/value vector. This allows the model to explicitly assign probability mass to "attend nowhere," preventing noise from contaminating the residual stream when no relevant context exists.
-
----
-
-## 🚀 Reproduction
-
-We provide a self-contained training script that requires only PyTorch. The dataset (WikiText-2) is downloaded and tokenized automatically.
+## 🚀 Quick Start
 
 ### Prerequisites
-```bash
-pip install torch
-```
-
-### Run Experiments
-To reproduce the Baseline, Rank 128, and Rank 32 experiments sequentially:
 
 ```bash
-make bottleneck_attention
+# Python 3.10+ required
+pip install torch numpy matplotlib seaborn tqdm
+
+# Or use the Makefile:
+make install_deps
 ```
 
-*Note: This runs the script `v19_transformer_attn_bottleneck.py`. Logs and checkpoints will be saved to `runs/`.*
+### Setup
+
+```bash
+# Prepare WikiText-2 dataset (auto-downloads if needed)
+make setup
+```
+
+### One-Command Replication
+
+To reproduce **all experiments from the paper**:
+
+```bash
+make replicate_paper
+```
+
+This automatically:
+
+1. Runs `setup` to prepare WikiText-2
+2. Runs WikiText-2 core experiments
+3. Runs ablation studies
+4. **Downloads and prepares FineWeb-Edu (~448MB)** if not present
+5. Runs FineWeb validation experiments
+6. Generates all figures
+
+This runs the full experimental suite (~8-12 hours on M1/M2 Mac or CUDA GPU):
+
+1. WikiText-2 baseline and ablations
+2. GQA comparison
+3. Long-context stress tests
+4. FineWeb-Edu validation (if `fineweb_100m.tokens` exists)
 
 ---
 
-## 📦 Inference Implications
+## 📁 Repository Structure
 
-The primary benefit of this architecture is **Inference Memory**.
-Standard KV Cache size is $2 \cdot L \cdot T \cdot d_{model}$.
-Bottleneck KV Cache size is $2 \cdot L \cdot T \cdot d_{attn}$.
+```
+decoupled-bottleneck-attention/
+├── v19_transformer_attn_bottleneck.py          # Tech report training script
+├── v21_transformer_decoupled_bottleneck.py     # Main training script
+├── v21_transformer_decoupled_bottleneck_gqa.py # Main training script
+├── v22_decoupled_bottleneck_survive_scale.py   # Production grade/Datacenter version
+├── bottleneck_attention_tech_report.pdf        # Tech report on preceeding research/results
+├── decoupled_bottleneck_attention.pdf          # PDF paper
+├── paper.tex                                   # LaTeX paper source
+├── references.bib                              # Bibliography
+├── Makefile                                    # Experiment commands
+├── plot_memory.py                              # Memory visualization
+├── plot_results.py                             # Result graphs
+├── vis_heatmap.py                              # Attention heatmaps
+├── experiments/                                # Every historical version of the code from beginning to now
+├── assets/                                     # Generated figures
+│   ├── convergence_plot.png
+│   ├── memory_footprint.png
+│   └── pareto_curve.png
+│   └── ...
+└── docs/
+    └── RESEARCH_MASTER_PLAN.md
+```
 
-| Context Length | Standard Cache ($d=512$) | Bottleneck Cache ($d=32$) | Savings |
-| :--- | :--- | :--- | :--- |
-| **4k** | ~10 MB | ~0.6 MB | **93%** |
-| **128k** | ~320 MB | ~20 MB | **93%** |
+---
 
-This effectively allows for **16 $\times$ longer context** or **16 $\times$ larger batch sizes** within the same memory budget for the KV cache.
+## 🧪 Experiment Guide
+
+### Core Experiments (WikiText-2)
+
+#### 1. Combined Bottleneck 96 (Best Perplexity)
+
+```bash
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_combined_baseline_96 \
+    --attn-mode bottleneck \
+    --attn-dim 96 \
+    --null-attn
+```
+
+#### 2. Decoupled Bottleneck (Semantic 32 + Geometric 64)
+
+```bash
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_decoupled_sem32_geo64 \
+    --attn-mode decoupled \
+    --sem-dim 32 \
+    --geo-dim 64 \
+    --attn-dim 128 \
+    --embed-dim 512 \
+    --tie-qk \
+    --null-attn
+```
+
+#### 3. Standard Baseline (Full Rank 512)
+
+```bash
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_baseline \
+    --attn-mode standard \
+    --d-model 512
+```
+
+### Ablation Studies
+
+#### GQA Comparison (8 Query / 2 KV Heads)
+
+```bash
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_gqa_kv2_parammatch \
+    --attn-mode gqa \
+    --kv-head 2 \
+    --d-model 512 \
+    --attn-dim 128 \
+    --null-attn \
+    --batch-size 64
+```
+
+#### Small Model Control (d_model=128)
+
+Proves the "wide residual stream" hypothesis—you can't just shrink everything:
+
+```bash
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_small_d128_standard \
+    --attn-mode standard \
+    --d-model 128 \
+    --layers 6 \
+    --n-head 4 \
+    --d-ff 512 \
+    --embed-dim 128 \
+    --null-attn \
+    --batch-size 64
+```
+
+#### Long Context Stress Tests
+
+```bash
+# 1024 context
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_decoupled_block1024 \
+    --attn-mode decoupled \
+    --sem-dim 32 --geo-dim 64 \
+    --block 1024 \
+    --batch-size 8 \
+    --steps 1200
+
+# 2048 context
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data wiki.train.tokens \
+    --out-dir runs/v21_decoupled_block2048 \
+    --attn-mode decoupled \
+    --sem-dim 32 --geo-dim 64 \
+    --block 2048 \
+    --batch-size 4 \
+    --steps 800
+```
+
+### FineWeb-Edu (Large Scale Validation)
+
+```bash
+# Step 1: Prepare dataset (downloads ~2GB)
+python3 prepare_fineweb.py --out fineweb_100m.tokens
+
+# Step 2: Run baseline
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data fineweb_100m.tokens \
+    --out-dir runs/v21_fineweb_baseline \
+    --attn-mode standard \
+    --d-model 512 \
+    --block 1024 \
+    --batch-size 16 \
+    --steps 6000
+
+# Step 3: Run decoupled
+python3 v21_transformer_decoupled_bottleneck_gqa.py \
+    --data fineweb_100m.tokens \
+    --out-dir runs/v21_fineweb_decoupled \
+    --attn-mode decoupled \
+    --sem-dim 32 --geo-dim 64 \
+    --block 1024 \
+    --batch-size 16 \
+    --tie-qk --null-attn \
+    --steps 6000
+```
+
+---
+
+## 📈 Generate Figures
+
+After running experiments:
+
+```bash
+# Convergence curves
+python3 plot_results.py
+
+# Memory footprint chart
+python3 plot_memory.py
+
+# Attention heatmaps (requires checkpoint)
+python3 vis_heatmap.py --ckpt runs/v21_combined_baseline_96/best.pt
+```
+
+---
+
+## 🔧 Model Configuration
+
+| Argument      | Default    | Description                                  |
+|:--------------|:-----------|:---------------------------------------------|
+| `--attn-mode` | `standard` | `standard`, `bottleneck`, `decoupled`, `gqa` |
+| `--d-model`   | `512`      | Residual stream width                        |
+| `--attn-dim`  | `512`      | Attention bottleneck dimension               |
+| `--sem-dim`   | `32`       | Semantic path dimension (decoupled mode)     |
+| `--geo-dim`   | `64`       | Geometric path dimension (decoupled mode)    |
+| `--null-attn` | `False`    | Enable learnable null token                  |
+| `--tie-qk`    | `False`    | Tie Q and K projections (semantic path)      |
+| `--kv-head`   | `None`     | KV heads for GQA mode                        |
+| `--block`     | `256`      | Context length                               |
+| `--layers`    | `6`        | Number of transformer layers                 |
+| `--n-head`    | `8`        | Number of attention heads                    |
 
 ---
 
 ## 📜 Citation
 
-If you find this useful, please cite the technical report:
-
 ```bibtex
-@techreport{vandommelen2025bottleneck,
-  title={Bottleneck Attention: Hard-Wiring Low-Dimensional Routing in GPT-Style Transformers},
+@article{vandommelen2025decoupled,
+  title={Decoupled Bottleneck Attention: Scaling Efficient Transformers via Low-Rank Semantic Routing},
   author={van Dommelen, Daniel Owen},
-  year={2025},
-  month={December},
-  institution={Independent Research},
-  url={https://github.com/TheApeMachine/bottleneck-attention}
+  journal={arXiv preprint arXiv:2025.XXXXX},
+  year={2025}
 }
 ```
-```
+
+---
+
+## 🙏 Acknowledgments
+
+This work builds on insights from:
+- [LoRA](https://arxiv.org/abs/2106.09685) (Hu et al., 2021) — Low-rank adaptation
+- [AdaRankGrad](https://arxiv.org/abs/2410.17881) (Refael et al., 2024) — Gradient rank dynamics
+- [DeepSeek-V2 MLA](https://arxiv.org/abs/2405.04434) — Multi-head latent attention
+- [ExLlamaV2](https://github.com/turboderp/exllamav2) — 4-bit KV cache quantization
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) — Production Q4_0 implementation
+
+---
+
+## 📄 License
+
+MIT License. See [LICENSE](LICENSE) for details.
