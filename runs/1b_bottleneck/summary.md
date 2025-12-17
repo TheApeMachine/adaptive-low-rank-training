@@ -1,22 +1,22 @@
 # Run Summary
 
-- Created: `2025-12-17T10:10:20+01:00`
-- Out dir: `runs/m4max_big_baseline`
+- Created: `2025-12-17T10:46:10+01:00`
+- Out dir: `runs/1b_bottleneck`
 - Device: `mps`
-- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --out-dir runs/m4max_big_baseline --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-mode standard --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --live rich --log-every 10 --eval-every 200 --vocab-size 50257`
+- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_1b.npy --data-format npy --out-dir runs/1b_bottleneck --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-dim 144 --sem-dim 48 --geo-dim 96 --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 4 --grad-accum 4 --block 4096 --train-seq-len 1024 --seq-schedule 512@0,1024@5000,2048@15000,4096@25000 --steps 50000 --grad-checkpoint --vocab-size 50257`
 
 ## Model Config
 
 ```json
 {
-  "attn_dim": 512,
-  "attn_mode": "standard",
-  "block_size": 256,
+  "attn_dim": 144,
+  "attn_mode": "bottleneck",
+  "block_size": 4096,
   "d_ff": 3072,
   "d_model": 768,
   "dropout": 0.0,
   "embed_dim": 512,
-  "geo_dim": 64,
+  "geo_dim": 96,
   "kv_head": null,
   "learned_temp": true,
   "mlp": "swiglu",
@@ -25,7 +25,7 @@
   "null_attn": false,
   "rope": true,
   "rope_base": 10000.0,
-  "sem_dim": 32,
+  "sem_dim": 48,
   "tie_qk": false,
   "vocab_size": 50257
 }
@@ -46,16 +46,16 @@
   "analysis_max_tokens": 256,
   "analysis_save_scores": false,
   "analysis_topk": 8,
-  "attn_dim": 512,
-  "attn_mode": "standard",
-  "batch_size": 8,
-  "block": 256,
+  "attn_dim": 144,
+  "attn_mode": "bottleneck",
+  "batch_size": 4,
+  "block": 4096,
   "ckpt": null,
   "compile": false,
   "compile_mode": "default",
   "d_ff": 3072,
   "d_model": 768,
-  "data": "fineweb_100m.npy",
+  "data": "fineweb_1b.npy",
   "data_dtype": "uint16",
   "data_format": "npy",
   "device": "mps",
@@ -65,9 +65,9 @@
   "eval_iters": 20,
   "eval_seq_len": 0,
   "exp": null,
-  "geo_dim": 64,
-  "grad_accum": 2,
-  "grad_checkpoint": false,
+  "geo_dim": 96,
+  "grad_accum": 4,
+  "grad_checkpoint": true,
   "grad_clip": 1.0,
   "instrument": "full",
   "kv_cache": "fp16",
@@ -86,10 +86,10 @@
   "kv_residual": 128,
   "layers": 12,
   "lion_betas": "0.9,0.99",
-  "live": "rich",
+  "live": "auto",
   "live_plot": false,
   "live_update_every": 1,
-  "log_every": 10,
+  "log_every": 100,
   "lr": 0.0003,
   "lr_schedule": "constant",
   "matmul_precision": "high",
@@ -106,7 +106,7 @@
   "opt_foreach": false,
   "opt_fused": false,
   "optimizer": "lion",
-  "out_dir": "runs/m4max_big_baseline",
+  "out_dir": "runs/1b_bottleneck",
   "param_dtype": "bf16",
   "print_config": false,
   "prompt_tokens": "0",
@@ -151,34 +151,21 @@
   "self_opt_verify_tol": 0.005,
   "self_opt_warmup": 1,
   "self_opt_warps": "4,8",
-  "sem_dim": 32,
-  "seq_schedule": "256@0,512@500,1024@2000",
+  "sem_dim": 48,
+  "seq_schedule": "512@0,1024@5000,2048@15000,4096@25000",
   "size": null,
-  "steps": 6000,
+  "steps": 50000,
   "sync_timing": false,
   "tb": false,
   "temperature": 1.0,
   "tie_qk": false,
   "tokenizer": "word",
   "top_k": null,
-  "train_seq_len": 512,
+  "train_seq_len": 1024,
   "val_frac": 0.1,
   "vocab_size": 50257,
   "warmup_steps": 0,
   "weight_decay": 0.1
 }
 ```
-
-## Results
-
-- Last step: `6000`
-- Best val loss: `6.326195` (ppl `559.03`)
-- Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
-
-## KV Cache Memory (batch=1)
-
-- Baseline fp16 (standard attn) @ ctx=256: `9.00MB`
-- This run policy @ ctx=256: `9.00MB`
-- Compression vs fp16 baseline: `1.00×`
-- This run policy @ 128k: `4.39GB`
 

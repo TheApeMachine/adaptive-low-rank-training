@@ -1,9 +1,9 @@
 # Run Summary
 
-- Created: `2025-12-17T10:10:20+01:00`
-- Out dir: `runs/m4max_big_baseline`
+- Created: `2025-12-17T15:33:33+01:00`
+- Out dir: `runs/m4max_baseline_seed1337`
 - Device: `mps`
-- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --out-dir runs/m4max_big_baseline --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-mode standard --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --live rich --log-every 10 --eval-every 200 --vocab-size 50257`
+- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --vocab-size 50257 --steps 6000 --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --embed-dim 512 --optimizer lion --lr 3e-4 --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --eval-every 200 --eval-iters 20 --log-every 10 --instrument full --analysis-every 100 --live rich --param-dtype bf16 --amp --amp-dtype bf16 --seed 1337 --out-dir runs/m4max_baseline_seed1337 --attn-mode standard`
 
 ## Model Config
 
@@ -106,7 +106,7 @@
   "opt_foreach": false,
   "opt_fused": false,
   "optimizer": "lion",
-  "out_dir": "runs/m4max_big_baseline",
+  "out_dir": "runs/m4max_baseline_seed1337",
   "param_dtype": "bf16",
   "print_config": false,
   "prompt_tokens": "0",
@@ -172,7 +172,7 @@
 ## Results
 
 - Last step: `6000`
-- Best val loss: `6.326195` (ppl `559.03`)
+- Best val loss: `6.296133` (ppl `542.47`)
 - Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
 
 ## KV Cache Memory (batch=1)

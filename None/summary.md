@@ -1,22 +1,22 @@
 # Run Summary
 
-- Created: `2025-12-17T10:10:20+01:00`
-- Out dir: `runs/m4max_big_baseline`
+- Created: `2025-12-17T14:00:12+01:00`
+- Out dir: `None`
 - Device: `mps`
-- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --out-dir runs/m4max_big_baseline --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-mode standard --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --live rich --log-every 10 --eval-every 200 --vocab-size 50257`
+- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode sample --ckpt runs/m4max_big_decoupled_qsemq4/best.pt --device mps --prompt-tokens 0 --max-new-tokens 128 --kv-cache fp16 --kv-residual 0 --kv-decode-block 1024 --kv-fused none`
 
 ## Model Config
 
 ```json
 {
-  "attn_dim": 512,
-  "attn_mode": "standard",
+  "attn_dim": 144,
+  "attn_mode": "decoupled",
   "block_size": 256,
   "d_ff": 3072,
   "d_model": 768,
   "dropout": 0.0,
   "embed_dim": 512,
-  "geo_dim": 64,
+  "geo_dim": 96,
   "kv_head": null,
   "learned_temp": true,
   "mlp": "swiglu",
@@ -25,7 +25,7 @@
   "null_attn": false,
   "rope": true,
   "rope_base": 10000.0,
-  "sem_dim": 32,
+  "sem_dim": 48,
   "tie_qk": false,
   "vocab_size": 50257
 }
@@ -37,7 +37,7 @@
 {
   "adam_betas": "0.9,0.95",
   "adam_eps": 1e-08,
-  "amp": true,
+  "amp": false,
   "amp_dtype": "bf16",
   "analysis_every": 100,
   "analysis_heads": "0",
@@ -47,17 +47,17 @@
   "analysis_save_scores": false,
   "analysis_topk": 8,
   "attn_dim": 512,
-  "attn_mode": "standard",
+  "attn_mode": "bottleneck",
   "batch_size": 8,
   "block": 256,
-  "ckpt": null,
+  "ckpt": "runs/m4max_big_decoupled_qsemq4/best.pt",
   "compile": false,
   "compile_mode": "default",
-  "d_ff": 3072,
-  "d_model": 768,
-  "data": "fineweb_100m.npy",
+  "d_ff": 2048,
+  "d_model": 512,
+  "data": null,
   "data_dtype": "uint16",
-  "data_format": "npy",
+  "data_format": "auto",
   "device": "mps",
   "dropout": 0.0,
   "embed_dim": 512,
@@ -66,7 +66,7 @@
   "eval_seq_len": 0,
   "exp": null,
   "geo_dim": 64,
-  "grad_accum": 2,
+  "grad_accum": 1,
   "grad_checkpoint": false,
   "grad_clip": 1.0,
   "instrument": "full",
@@ -76,28 +76,28 @@
   "kv_cache_k_sem": null,
   "kv_cache_v": null,
   "kv_decode_block": 1024,
-  "kv_fused": "auto",
+  "kv_fused": "none",
   "kv_head": null,
   "kv_qblock": 32,
   "kv_qblock_k": null,
   "kv_qblock_k_geo": null,
   "kv_qblock_k_sem": null,
   "kv_qblock_v": null,
-  "kv_residual": 128,
-  "layers": 12,
+  "kv_residual": 0,
+  "layers": 6,
   "lion_betas": "0.9,0.99",
-  "live": "rich",
+  "live": "auto",
   "live_plot": false,
   "live_update_every": 1,
-  "log_every": 10,
+  "log_every": 100,
   "lr": 0.0003,
   "lr_schedule": "constant",
   "matmul_precision": "high",
-  "max_new_tokens": 50,
+  "max_new_tokens": 128,
   "min_lr": 0.0,
   "mlp": "swiglu",
-  "mode": "train",
-  "n_head": 12,
+  "mode": "sample",
+  "n_head": 8,
   "no_learned_temp": false,
   "no_null_attn": false,
   "no_rope": false,
@@ -105,9 +105,9 @@
   "null_attn": false,
   "opt_foreach": false,
   "opt_fused": false,
-  "optimizer": "lion",
-  "out_dir": "runs/m4max_big_baseline",
-  "param_dtype": "bf16",
+  "optimizer": "adamw",
+  "out_dir": null,
+  "param_dtype": "fp32",
   "print_config": false,
   "prompt_tokens": "0",
   "rope": false,
@@ -152,7 +152,7 @@
   "self_opt_warmup": 1,
   "self_opt_warps": "4,8",
   "sem_dim": 32,
-  "seq_schedule": "256@0,512@500,1024@2000",
+  "seq_schedule": null,
   "size": null,
   "steps": 6000,
   "sync_timing": false,
@@ -161,24 +161,11 @@
   "tie_qk": false,
   "tokenizer": "word",
   "top_k": null,
-  "train_seq_len": 512,
+  "train_seq_len": 0,
   "val_frac": 0.1,
-  "vocab_size": 50257,
+  "vocab_size": null,
   "warmup_steps": 0,
   "weight_decay": 0.1
 }
 ```
-
-## Results
-
-- Last step: `6000`
-- Best val loss: `6.326195` (ppl `559.03`)
-- Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
-
-## KV Cache Memory (batch=1)
-
-- Baseline fp16 (standard attn) @ ctx=256: `9.00MB`
-- This run policy @ ctx=256: `9.00MB`
-- Compression vs fp16 baseline: `1.00×`
-- This run policy @ 128k: `4.39GB`
 

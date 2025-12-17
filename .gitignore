@@ -16,3 +16,8 @@ EXPERIMENT_AUDIT.md
 fineweb_100m.npy
 .gitignore
 fineweb_100m.npy.meta
+.DS_Store
+.DS_Store
+*.npy
+*.meta
+critiques.md

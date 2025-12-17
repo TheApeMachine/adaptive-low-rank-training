@@ -1,23 +1,23 @@
 # Run Summary
 
-- Created: `2025-12-17T10:10:20+01:00`
-- Out dir: `runs/m4max_big_baseline`
+- Created: `2025-12-17T11:58:04+01:00`
+- Out dir: `runs/m4max_big_gqa`
 - Device: `mps`
-- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --out-dir runs/m4max_big_baseline --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-mode standard --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --live rich --log-every 10 --eval-every 200 --vocab-size 50257`
+- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --out-dir runs/m4max_big_gqa --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --attn-mode gqa --kv-head 2 --attn-dim 768 --param-dtype bf16 --amp --amp-dtype bf16 --optimizer lion --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --live rich --log-every 10 --eval-every 200 --vocab-size 50257`
 
 ## Model Config
 
 ```json
 {
-  "attn_dim": 512,
-  "attn_mode": "standard",
+  "attn_dim": 768,
+  "attn_mode": "gqa",
   "block_size": 256,
   "d_ff": 3072,
   "d_model": 768,
   "dropout": 0.0,
   "embed_dim": 512,
   "geo_dim": 64,
-  "kv_head": null,
+  "kv_head": 2,
   "learned_temp": true,
   "mlp": "swiglu",
   "n_head": 12,
@@ -46,8 +46,8 @@
   "analysis_max_tokens": 256,
   "analysis_save_scores": false,
   "analysis_topk": 8,
-  "attn_dim": 512,
-  "attn_mode": "standard",
+  "attn_dim": 768,
+  "attn_mode": "gqa",
   "batch_size": 8,
   "block": 256,
   "ckpt": null,
@@ -77,7 +77,7 @@
   "kv_cache_v": null,
   "kv_decode_block": 1024,
   "kv_fused": "auto",
-  "kv_head": null,
+  "kv_head": 2,
   "kv_qblock": 32,
   "kv_qblock_k": null,
   "kv_qblock_k_geo": null,
@@ -106,7 +106,7 @@
   "opt_foreach": false,
   "opt_fused": false,
   "optimizer": "lion",
-  "out_dir": "runs/m4max_big_baseline",
+  "out_dir": "runs/m4max_big_gqa",
   "param_dtype": "bf16",
   "print_config": false,
   "prompt_tokens": "0",
@@ -172,13 +172,13 @@
 ## Results
 
 - Last step: `6000`
-- Best val loss: `6.326195` (ppl `559.03`)
+- Best val loss: `6.302376` (ppl `545.87`)
 - Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
 
 ## KV Cache Memory (batch=1)
 
 - Baseline fp16 (standard attn) @ ctx=256: `9.00MB`
-- This run policy @ ctx=256: `9.00MB`
-- Compression vs fp16 baseline: `1.00×`
-- This run policy @ 128k: `4.39GB`
+- This run policy @ ctx=256: `1.50MB`
+- Compression vs fp16 baseline: `6.00×`
+- This run policy @ 128k: `750.0MB`
 
