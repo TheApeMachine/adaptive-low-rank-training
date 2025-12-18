@@ -40,7 +40,7 @@ The Key-Value cache in Transformer models scales linearly with sequence length a
 
 We propose \textbf{Decoupled Bottleneck Attention}, an architectural modification that exploits the empirical observation that \textit{semantic routing}---deciding which tokens attend to which---operates in a low-rank subspace ($r \approx 32$), while \textit{positional geometry} requires higher fidelity ($r \approx 64$). By decoupling these concerns into separate projection paths, we achieve:
 \begin{itemize}
-    \item \textbf{Up to 168$\times$ end-to-end KV-cache reduction} in a fixed-rank long-context scenario, where $\sim 42.7\times$ comes from architectural dimension reduction and an additional $4\times$ comes from standard 4-bit quantization (Section~2.6)
+    \item \textbf{Observed KV-cache savings at our experimental scale (v21/v29).} Reducing the attention interaction dimension yields a consistent $\approx 5.33\times$ FP16 KV-cache reduction in both our v21 toy suite ($d_{\text{model}}{=}512$, $d_{\text{attn}}{=}96$) and v29 scaling suite ($d_{\text{model}}{=}768$, $d_{\text{attn}}{=}144$); in our v29 implementation this corresponds to a measured $\sim$5.2$\times$ FP16 reduction at 128k context. Standard Q4\_0 KV-cache quantization composes with this to $\sim$19--21$\times$ end-to-end reduction at the same rank (Section~2.6).
     \item \textbf{Evidence at two scales:} v21 WikiText-2 ablations show that bottlenecking attention can outperform a full-rank baseline; v29 FineWeb-Edu scaling runs show that decoupling (48/96) outperforms a standard baseline, GQA (kv=2), and a matched-rank bottleneck baseline (Table~\ref{tab:fineweb})
     \item \textbf{Superior data efficiency compared to Grouped-Query Attention (GQA).} On FineWeb-Edu, our Decoupled Bottleneck model ($d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$; total $d_{\text{attn}}=144$) achieves lower validation loss than a GQA baseline with shared KV heads (kv=2) under the same training recipe (mean over three seeds: $5.804 \pm 0.087$ vs $6.348 \pm 0.161$), demonstrating that reducing the \textit{interaction rank} is a more effective compression strategy than head sharing.
 \end{itemize}
@@ -63,7 +63,7 @@ Modern Transformer architectures \cite{vaswani2017attention} achieve remarkable 
 
 We begin with a simple observation: in a 512-dimensional layer, the neurons are not independent. They move in \textit{sympathetic clusters}---correlated groups that reduce the intrinsic dimensionality of the representation. Prior work on LoRA \cite{hu2021lora} demonstrated that weight \textit{updates} during fine-tuning are low-rank (typically $r \leq 64$). Recent work on gradient dynamics \cite{refael2024adarankgrad} shows that optimization naturally collapses to low rank. We extend this observation to argue that the \textit{architecture itself}---specifically the attention mechanism---should be structurally constrained to match this intrinsic rank.
 
-Empirical measurements from our experiments show that the effective rank of $W_Q$ and $W_K$ projections stabilizes around 11-32 dimensions, even when the nominal dimension is 512. This aligns with theoretical analysis by Bhojanapalli et al. \cite{bhojanapalli2020lowrank}, who identified a ``low-rank bottleneck'' in multi-head attention, and recent work by Kobayashi et al. \cite{kobayashi2024weightdecay} showing that weight decay actively induces rank reduction during training. Wang et al. \cite{wang2025lowdim} further demonstrate that attention outputs are approximately 60\% low-dimensional, adding to low-dimensional residual subspaces. Crucially, Refael et al. \cite{refael2024adarankgrad} proved that gradient rank \textit{decreases monotonically} during training, asymptotically approaching rank one---providing theoretical justification for why architectural bottlenecks become increasingly appropriate as training progresses. Chiang \& Yogatama \cite{chiang2025rope} show that RoPE may cause dimension inefficiency for long-distance retrieval, supporting our use of higher dimensions (64) for the geometric path.
+Empirical measurements from our experiments show that the \textit{Q/K projection activations} feeding attention have low entropy effective rank (typically in the tens of dimensions, far below the nominal width; Appendix~\ref{app:effective_rank}). This aligns with theoretical analysis by Bhojanapalli et al. \cite{bhojanapalli2020lowrank}, who identified a ``low-rank bottleneck'' in multi-head attention, and recent work by Kobayashi et al. \cite{kobayashi2024weightdecay} showing that weight decay actively induces rank reduction during training. Wang et al. \cite{wang2025lowdim} further demonstrate that attention outputs are approximately 60\% low-dimensional, adding to low-dimensional residual subspaces. Crucially, Refael et al. \cite{refael2024adarankgrad} proved that gradient rank \textit{decreases monotonically} during training, asymptotically approaching rank one---providing theoretical justification for why architectural bottlenecks become increasingly appropriate as training progresses. Chiang \& Yogatama \cite{chiang2025rope} show that RoPE may cause dimension inefficiency for long-distance retrieval, supporting our use of higher dimensions (64) for the geometric path.
 
 \subsection{Comparison with Existing Approaches}
 
@@ -83,8 +83,8 @@ DeBERTa \cite{he2020deberta} pioneered the separation of content and position re
 \begin{enumerate}
     \item We demonstrate that attention routing can be performed in $\sim$32 dimensions without perplexity degradation, while positional encoding requires $\sim$64 dimensions for RoPE fidelity.
     \item We propose \textbf{Decoupled Bottleneck Attention}, which separates semantic and geometric scoring paths with asymmetric dimensionality.
-    \item We introduce a \textbf{Null Token} mechanism that stabilizes training by providing an explicit ``attend nowhere'' option.
-    \item We show that architectural dimension reduction yields large KV-cache savings, and when combined with standard 4-bit quantization can reach \textbf{up to 168$\times$} end-to-end KV-cache compression in a fixed-rank scenario (Figure~\ref{fig:memory}).
+    \item We introduce and \textbf{evaluate} a \textbf{Null Token} mechanism that provides an explicit ``attend nowhere'' option (beneficial in some low-rank regimes, but not universally; Appendix~\ref{app:decoupled_ablations}).
+    \item We report measured KV-cache footprints for our implementations and show that reducing the interaction dimension yields a consistent $\approx 5.33\times$ FP16 KV-cache reduction at our experimental scales (v21/v29). We discuss how this composes with standard KV-cache quantization; large fixed-rank scaling numbers are treated as non-validated arithmetic, not a central claim (Section~2.6).
 \end{enumerate}
 
 % ============================================================================
@@ -159,7 +159,7 @@ The semantic path operates on pure content similarity, while the geometric path 
 \begin{equation}
     V = XW_V, \quad W_V \in \mathbb{R}^{d_{\text{model}} \times d_{\text{attn}}}
 \end{equation}
-where $d_{\text{attn}} = d_{\text{sem}} + d_{\text{geo}} = 96$ in our default configuration.
+where $d_{\text{attn}} = d_{\text{sem}} + d_{\text{geo}}$. In our smaller v21 suite we use a 32/64 split ($d_{\text{attn}}{=}96$), and in our v29 scaling suite we use a 48/96 split ($d_{\text{attn}}{=}144$).
 
 \subsection{The Null Token Mechanism}
 
@@ -168,7 +168,7 @@ Low-rank attention can become unstable when queries lack semantically appropriat
     \text{Score}_{\text{null}} = \frac{Q_{\text{sem}} k_{\emptyset,\text{sem}}^\top}{\sqrt{d_{\text{sem}}/H}} + \frac{Q_{\text{geo}} k_{\emptyset,\text{geo}}^\top}{\sqrt{d_{\text{geo}}/H}}
 \end{equation}
 
-This score is concatenated to the attention matrix before softmax, allowing the model to ``dump'' attention mass when no key is appropriate, which stabilizes training at very low ranks.
+This score is concatenated to the attention matrix before softmax, allowing the model to ``dump'' attention mass when no key is appropriate, which can stabilize training at very low ranks. In our v29 48/96 setting, however, the null token is not beneficial under this recipe (Appendix~\ref{app:decoupled_ablations}).
 
 \subsection{Tied Q-K Projections}
 
@@ -180,26 +180,27 @@ For inference, we apply aggressive quantization to the KV-cache. Recent work has
 \begin{equation}
     x_{\text{quantized}} = \text{round}\left(\frac{x}{\text{scale}}\right), \quad \text{scale} = \frac{\max(|x_{\text{block}}|)}{7}
 \end{equation}
-where each block of 32 elements shares a single FP16 scale factor. Combined with the dimension reduction ($d_{\text{attn}} = 96$ vs $d_{\text{model}} = 512$), this achieves:
+where each block of 32 elements shares a single FP16 scale factor. In the idealized limit (ignoring scale metadata) 4-bit values correspond to 0.5 bytes/value. With Q4\_0 block scales, the effective bytes/value is slightly larger (18 bytes per 32 values $\Rightarrow$ 0.5625 bytes/value), so the ideal 4$\times$ factor becomes $\approx 3.56\times$ in practice. Combined with dimension reduction, the per-layer KV-cache reduction is approximately:
 \begin{equation}
-    \text{Compression} = \underbrace{\frac{512}{96}}_{\text{Dimension}} \times \underbrace{\frac{16}{4}}_{\text{Quantization}} = 5.33 \times 4 \approx 21\times \text{ (per-layer)}
+    \text{Compression} \approx \underbrace{\frac{d_{\text{model}}}{d_{\text{attn}}}}_{\text{Dimension}} \times \underbrace{\frac{2~\text{bytes}}{0.5~\text{bytes}}}_{\text{Ideal Q4}} \;\;\approx\;\; \frac{d_{\text{model}}}{d_{\text{attn}}}\times 4.
 \end{equation}
+Both our v21 (512$\rightarrow$96) and v29 (768$\rightarrow$144) settings yield the same dimension factor (5.33$\times$), implying $\sim$19--21$\times$ end-to-end FP16$\rightarrow$Q4 savings depending on quantization overheads.
 
-\paragraph{Calculation of 168$\times$.}
-The KV-cache memory at long context depends on the choice of attention dimension $d_{\text{attn}}$ at scale. For a rough Llama-7B-like configuration (32 layers, $d=4096$, 128k context, batch=1), the FP16 KV cache is:
+\paragraph{Scaling arithmetic (context only; not validated at scale).}
+The KV-cache memory at long context depends on the choice of attention dimension $d_{\text{attn}}$ at scale. For a rough Llama-like configuration (32 layers, $d_{\text{model}}=4096$, 128k context, batch=1), the FP16 KV cache is:
 \[
 M_{\text{FP16}} \approx 2 \cdot 32 \cdot 4096 \cdot 128\text{k} \cdot 2 \text{ bytes} \approx 64~\text{GiB}.
 \]
-With 4-bit KV-cache quantization (0.5 bytes/value), the memory becomes:
+With 4-bit KV-cache quantization (idealized 0.5 bytes/value), the memory becomes:
 \[
 M_{\text{Q4}} \approx 2 \cdot 32 \cdot d_{\text{attn}} \cdot 128\text{k} \cdot 0.5 \text{ bytes}.
 \]
-This yields two useful reference scenarios:
+This yields two reference scenarios (for context):
 \begin{itemize}
     \item \textbf{Constant-fraction $d_{\text{attn}}$ (e.g., $d_{\text{attn}}=768$):} $M_{\text{Q4}} \approx 3.0$~GiB, for an overall reduction of $\sim 21\times$.
-    \item \textbf{Fixed-rank $d_{\text{attn}}$ (e.g., $d_{\text{attn}}=96$):} $M_{\text{Q4}} \approx 0.38$~GiB, for an overall reduction of $\sim 168\times$.
+    \item \textbf{Speculative fixed-rank $d_{\text{attn}}$ (intuition only):} If one could keep $d_{\text{attn}}$ roughly constant while scaling $d_{\text{model}}$ (e.g., $d_{\text{attn}}{=}96$ at $d_{\text{model}}{=}4096$), the same linear arithmetic yields an $\mathcal{O}(10^2)$ reduction versus a standard FP16 baseline.\footnote{This is the origin of the often-quoted ``168$\times$'': \((4096/96)\times 4 \approx 171\), sometimes rounded. Including Q4\_0 scale metadata gives \((4096/96)\times (2/0.5625)\approx 152\). We do \emph{not} validate fixed-rank scaling in this work.}
 \end{itemize}
-The architectural contribution is the \textit{dimension reduction} (the ratio $4096/d_{\text{attn}}$); the additional factor of $4\times$ comes from standard 16$\rightarrow$4-bit quantization.
+The architectural contribution is the \textit{dimension reduction} (the ratio $4096/d_{\text{attn}}$); the additional factor of $4\times$ comes from standard 16$\rightarrow$4-bit quantization (idealized). For fair comparisons, note that GQA caches can also be quantized; e.g., an $8\times$ GQA KV cache with Q4 would already yield $\sim$32$\times$ reduction vs FP16 standard. We therefore treat fixed-rank scaling numbers as back-of-the-envelope upper bounds, not a primary experimental claim.
 
 \paragraph{Heterogeneous KV-cache quantization (decoupled).}
 A practical benefit of decoupling is that it enables \textit{heterogeneous} KV-cache quantization: we can compress the semantic path more aggressively (e.g., Q4) while keeping the geometric (RoPE) path at higher fidelity (e.g., Q8). As a lightweight sanity check, we compared FP16 caches to a decoupled policy with $K_{\text{sem}}=\text{Q4}$, $K_{\text{geo}}=\text{Q8}$, $V=\text{Q4}$ and a 128-token FP16 residual window. On a small held-out calibration slice from FineWeb-Edu, this policy yielded $\Delta$NLL $\approx 0.015$ nats/token (perplexity ratio $\approx 1.015$) and $\mathrm{KL}(p_{\text{FP16}} \| p_{\text{quant}}) \approx 0.006$ nats/token, while preserving identical greedy decoding for short prompts. These guardrail metrics suggest that aggressive semantic compression can be applied without catastrophic degradation, even though stochastic sampling trajectories may diverge due to small distribution shifts.
@@ -219,18 +220,25 @@ We use a two-stage experimental strategy: the \textbf{v21 ablation suite} (WikiT
 \paragraph{Model Configuration.}
 We report results from two experiment suites:
 \begin{itemize}
-    \item \textbf{v21 (ablation suite):} a smaller 6-layer model trained on WikiText-2 for rapid architectural iteration.
-    \item \textbf{v29 (scaling suite):} a larger 12-layer model trained on FineWeb-Edu (100M tokens) to validate scaling behavior.
+    \item \textbf{v21 (ablation suite):} a smaller 6-layer model ($d_{\text{model}}{=}512$) trained on WikiText-2 for rapid architectural iteration.
+    \item \textbf{v29 (scaling suite):} a larger 12-layer model ($d_{\text{model}}{=}768$, 12 heads, $d_{\text{ff}}{=}3072$) trained on FineWeb-Edu (100M-token dataset) to validate scaling behavior.
 \end{itemize}
 
 \paragraph{Datasets.}
 \begin{itemize}
     \item \textbf{WikiText-2}: 2M tokens of Wikipedia text used for rapid prototyping in the v21 ablation suite.
-    \item \textbf{FineWeb-Edu}: 100M tokens of educational web content used for the v29 scaling suite. In our implementation, we use a 50,257-token vocabulary (GPT-2 compatible) for tokenized data.
+    \item \textbf{FineWeb-Edu}: a 100M-token dataset of educational web content used for the v29 scaling suite. In our implementation, we use a 50,257-token vocabulary (GPT-2 compatible) for tokenized data.
 \end{itemize}
 
 \paragraph{Training.}
-Unless otherwise noted, models are trained for 6000 steps with gradient clipping at 1.0. Exact hyperparameters and configurations are recorded in the run logs.
+Unless otherwise noted, v29 models are trained for 6000 steps with:
+\begin{itemize}
+    \item Lion optimizer ($\beta_1{=}0.9,\beta_2{=}0.99$), constant learning rate $3\times 10^{-4}$, weight decay 0.1, warmup 0
+    \item Batch size 8 with gradient accumulation 2 (global batch = 16 sequences/update), gradient clipping at 1.0
+    \item Training context length: 256 tokens (block size 256); RoPE extrapolation is evaluated separately at 2$\times$ and 4$\times$ this length (Appendix~\ref{app:long_context})
+    \item BF16 parameters with AMP (BF16), dropout 0.0, SwiGLU MLP
+\end{itemize}
+All v29 runs in Table~\ref{tab:fineweb} were executed with the same recipe on Apple Silicon via MPS; full configurations are recorded in the run logs.
 
 \subsection{v21 Ablation Suite: WikiText-2 Results}
 
@@ -265,18 +273,18 @@ Table~\ref{tab:wikitext_v21} shows that the Combined 96 bottleneck achieves the 
 
 \subsection{v29 Scaling Suite: FineWeb-Edu Results}
 
-To validate that our findings generalize beyond small datasets, we train on 100M tokens from FineWeb-Edu (Figure~\ref{fig:convergence_fineweb}).
+To validate that our findings generalize beyond small datasets, we train on a 100M-token FineWeb-Edu dataset (Figure~\ref{fig:convergence_fineweb}).
 
 \begin{table}[htbp]
 \centering
 \small
-\caption{FineWeb-Edu Validation Loss (100M tokens, 1024 context, 6000 steps; v29 suite; mean $\pm$ std over three seeds)}
+\caption{FineWeb-Edu Validation Loss (100M-token dataset; 256 context; 6000 steps; v29 suite; mean $\pm$ std over three seeds)}
 \label{tab:fineweb}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
 \textbf{Model} & \textbf{Attn Config} & \textbf{Params} & \textbf{Val Loss} & \textbf{Val PPL} \\
 \midrule
-Standard Baseline & $d = 512$ & 139.8M & $6.385 \pm 0.222$ & $602.9 \pm 140.4$ \\
+Standard Baseline & $d_{\text{attn}}=d_{\text{model}}=768$ & 139.8M & $6.385 \pm 0.222$ & $602.9 \pm 140.4$ \\
 GQA (kv=2) & 12Q/2KV & 128.0M & $6.348 \pm 0.161$ & $576.5 \pm 95.5$ \\
 Bottleneck (rank 144) & $d_{\text{attn}}=144$ & 116.8M & $6.424 \pm 0.090$ & $617.9 \pm 56.9$ \\
 \textbf{Decoupled 48/96} & $d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$ & \textbf{116.8M} & $\mathbf{5.804 \pm 0.087}$ & $\mathbf{332.3 \pm 28.5}$ \\
@@ -285,12 +293,13 @@ Bottleneck (rank 144) & $d_{\text{attn}}=144$ & 116.8M & $6.424 \pm 0.090$ & $61
 \end{table}
 
 \paragraph{Scaling Observation.}
-On FineWeb-Edu (100M tokens), the Decoupled Bottleneck model \textit{outperformed} the Standard Baseline, a reduced-KV GQA baseline (kv=2), and a matched-rank Bottleneck baseline (Table~\ref{tab:fineweb}). We observe substantial run-to-run variability for the full-rank baseline under this short training regime; therefore, we report mean $\pm$ std over three seeds in Table~\ref{tab:fineweb}, and show representative learning curves for a single seed in Figure~\ref{fig:convergence_fineweb}.
+On FineWeb-Edu (100M-token dataset), the Decoupled Bottleneck model \textit{outperformed} the Standard Baseline, a reduced-KV GQA baseline (kv=2), and a matched-rank Bottleneck baseline (Table~\ref{tab:fineweb}). We observe substantial run-to-run variability for the full-rank baseline under this short training regime; therefore, we report mean $\pm$ std over three seeds in Table~\ref{tab:fineweb}, and show representative learning curves for a single seed in Figure~\ref{fig:convergence_fineweb}.
+To address baseline tuning concerns, we include a small baseline learning-rate sweep and a longer-horizon comparison (seed 1337) in Appendix~\ref{app:baseline_fairness}.
 
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\textwidth]{\detokenize{assets/m4max_seed1337_convergence.png}}
-\caption{Validation loss curves on FineWeb-Edu (100M tokens; seed 1337). Under the same training setup, the Decoupled Bottleneck model converges to the lowest validation loss, outperforming both the standard baseline and GQA.}
+\caption{Validation loss curves on FineWeb-Edu (100M-token dataset; seed 1337). Under the same training setup, the Decoupled Bottleneck model converges to the lowest validation loss, outperforming both the standard baseline and GQA.}
 \label{fig:convergence_fineweb}
 \end{figure}
 
@@ -317,12 +326,7 @@ We compared our method against Grouped-Query Attention (GQA) with matched KV mem
 Holding the same total attention dimension fixed ($d_{\text{attn}}=144$), the Decoupled Bottleneck model (48/96) improves validation loss at essentially the same KV cache footprint (\(\sim 0.84\)~GB at 128k context), suggesting that semantic/geometric separation can improve optimization and generalization at this scale (Table~\ref{tab:fineweb}).
 
 \paragraph{Long Context Stability.}
-We verify that the geometric path handles extended context correctly:
-\begin{itemize}
-    \item 1024 context: Val Loss 5.86 (converged smoothly)
-    \item 2048 context: Val Loss 6.09 (converged smoothly)
-\end{itemize}
-The higher loss is expected due to reduced batch size; the key observation is stable training with RoPE on 64 dimensions.
+Appendix~\ref{app:long_context} reports two lightweight probes: teacher-forced RoPE extrapolation (256/512/1024 contexts) and a passkey needle-in-a-haystack prompt. These probes are intended as regression tests (not downstream evaluations); we report likelihood-based needle effects because strict next-token retrieval accuracy is often 0\% for base LMs.
 
 \subsection{Memory-Quality Trade-off}
 
@@ -337,23 +341,23 @@ Figure~\ref{fig:pareto} shows the quality--efficiency trade-off for our FineWeb-
 
 \subsection{Memory Footprint Analysis}
 
-Table~\ref{tab:memory} shows the KV-cache memory requirements for a 128k context at Llama-7B scale (32 layers, $d = 4096$):
+Table~\ref{tab:memory} gives an illustrative KV-cache scaling projection for a 128k context in a Llama-like configuration (32 layers, $d_{\text{model}} = 4096$). We intentionally \emph{do not} foreground optimistic fixed-rank ``upper bound'' numbers here; the experimentally grounded takeaway is the linear dependence on $d_{\text{attn}}$ and the $\approx 5.33\times$ FP16 reduction that follows from our toy-scale choices ($512\!\rightarrow\!96$ in v21; $768\!\rightarrow\!144$ in v29), which we measure directly in our v29 implementation.
 
 \begin{table}[htbp]
 \centering
 \small
-\caption{KV-Cache Memory for 128k Context (Llama-7B Scale)}
+\caption{KV-Cache Memory for 128k Context (Llama-like scale; projected)}
 \label{tab:memory}
 \begin{tabular}{@{}lcc@{}}
 \toprule
 \textbf{Architecture} & \textbf{VRAM} & \textbf{Compression} \\
 \midrule
 Standard (FP16) & 64.0 GB & 1$\times$ \\
-GQA 8$\times$ (FP16) & 16.0 GB & 4$\times$ \\
+GQA (32Q/4KV; FP16) & 8.0 GB & 8$\times$ \\
+GQA (32Q/4KV; Q4, ideal) & 2.0 GB & 32$\times$ \\
 MLA (FP16) & 4.3 GB & 15$\times$ \\
 Bottleneck (FP16) & 1.5 GB & 43$\times$ \\
-\textbf{Decoupled (Q4, fixed-rank $d_{\text{attn}}{=}96$)} & \textbf{0.38 GB} & \textbf{168$\times$} \\
-\textbf{Decoupled (Q4, constant-fraction $d_{\text{attn}}{=}768$)} & \textbf{3.0 GB} & \textbf{21$\times$} \\
+Decoupled (Q4, constant-fraction $d_{\text{attn}}{=}768$) & 3.0 GB & 21$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -361,7 +365,7 @@ Bottleneck (FP16) & 1.5 GB & 43$\times$ \\
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.85\textwidth]{\detokenize{assets/memory_footprint.png}}
-\caption{KV-cache memory comparison at 128k context (illustrative). Depending on whether $d_{\text{attn}}$ scales with $d_{\text{model}}$ or is held fixed, the end-to-end FP16$\rightarrow$Q4 reduction ranges from $\sim$21$\times$ (constant fraction) up to $\sim$168$\times$ (fixed-rank).}
+\caption{KV-cache memory comparison at 128k context (illustrative scaling projection). The experimentally grounded point is that KV-cache memory scales linearly with $d_{\text{attn}}$; combining this with standard KV-cache quantization yields multiplicative savings. Large fixed-rank upper-bound numbers are omitted from the main narrative and treated as speculative arithmetic (Section~2.6).}
 \label{fig:memory}
 \end{figure}
 
@@ -395,11 +399,14 @@ Our experiments reveal a two-stage story: v21 ablations on WikiText-2 are useful
 \paragraph{Recommendation.}
 For \textit{training}, use the v21 ablation suite to quickly explore attention-rank and decoupling choices, then validate at scale with the v29 FineWeb suite. For \textit{inference} under memory constraints, convert to Decoupled with heterogeneous quantization (aggressively compress semantic, preserve geometric fidelity).
 
+\paragraph{Flash/SDPA compatibility.}
+Decoupled Bottleneck Attention can be implemented using PyTorch's fused \texttt{scaled\_dot\_product\_attention} by concatenating the scaled semantic and geometric Q/K projections along the head dimension, making it compatible with modern Flash Attention kernels.
+
 \subsection{Limitations}
 
 \begin{itemize}
     \item \textbf{Sensitivity to setup:} Results can depend on the training recipe and implementation details. Earlier (v21) FineWeb runs showed a degradation for decoupled attention, whereas the v29 decoupled model improves substantially. This motivates replication across seeds, longer training, and additional datasets.
-    \item Experiments are limited to 512-dim models. Verification at 7B+ scale is needed.
+    \item Experiments are limited to $\sim$140M parameter models (up to $d_{\text{model}}{=}768$) trained on a 100M-token dataset. Verification at 7B+ scale is needed.
     \item The optimal $(d_{\text{sem}}, d_{\text{geo}})$ split may vary with model scale.
     \item We have not evaluated on downstream tasks (e.g., MMLU, HellaSwag).
     \item Throughput measurements are from training; inference latency benchmarks are future work.
@@ -410,14 +417,14 @@ For \textit{training}, use the v21 ablation suite to quickly explore attention-r
 % ============================================================================
 \section{Conclusion}
 
-We have demonstrated that attention in Transformers contains significant redundancy. On FineWeb-Edu (100M tokens), the Decoupled Bottleneck architecture \textbf{surpassed} the standard baseline, a GQA baseline (kv=2), and a matched-rank Bottleneck baseline under the same training recipe (Table~\ref{tab:fineweb}). These results suggest that, at this scale and training horizon, standard high-dimensional attention can be over-parameterized; larger-scale validation and longer training are important future work.
+We have demonstrated that attention in Transformers contains significant redundancy. On FineWeb-Edu (100M-token dataset), the Decoupled Bottleneck architecture \textbf{surpassed} the standard baseline, a GQA baseline (kv=2), and a matched-rank Bottleneck baseline under the same training recipe (Table~\ref{tab:fineweb}). These results suggest that, at this scale and training horizon, standard high-dimensional attention can be over-parameterized; larger-scale validation and longer training are important future work.
 
 The core insight is architectural: \textbf{Attention is a router, not a processor.} The heavy computation should happen in the feedforward layers (which we leave at full rank), while attention merely selects which tokens to aggregate. By matching the architecture to this functional role, we unlock dramatic efficiency gains.
 
-Our Decoupled Bottleneck Attention separates semantic matching from positional geometry, allowing aggressive compression on the former while preserving RoPE fidelity on the latter. Combined with 4-bit quantization, this enables 128k-context inference on consumer hardware (Figure~\ref{fig:memory})---transforming a datacenter problem into a laptop-solvable one.
+Our Decoupled Bottleneck Attention separates semantic matching from positional geometry, allowing aggressive compression on the former while preserving RoPE fidelity on the latter. Combined with 4-bit KV-cache quantization, the memory arithmetic suggests that 128k-context inference can become \textit{feasible} on consumer hardware under fixed-rank scaling assumptions (Figure~\ref{fig:memory}); however, this is a projection and we do not claim validated 128k \textit{quality} in this work.
 
 \paragraph{Future Work.}
-We plan to: (1) validate at 7B+ scale where the efficiency gains compound; (2) explore learned mixing weights between semantic and geometric paths; (3) test robustness across seeds, longer training, and additional datasets to understand when decoupling improves optimization; and (4) benchmark inference latency on production hardware.
+We plan to: (1) validate at 7B+ scale where the efficiency gains compound; (2) explore learned mixing weights between semantic and geometric paths; (3) test robustness across seeds, longer training, and additional datasets to understand when decoupling improves optimization; and (4) benchmark inference latency on production hardware. In parallel, we are migrating from the monolithic research prototype to a modular production-oriented implementation (see the repository's \path{production/} code), with an evolving self-optimization layer for KV-cache policies and resource-aware inference; future work will validate functional parity and quantify real-world latency/memory trade-offs.
 
 % ============================================================================
 % STATEMENTS
@@ -428,7 +435,7 @@ We plan to: (1) validate at 7B+ scale where the efficiency gains compound; (2) e
 The author declares no competing interests. This research was conducted independently without corporate affiliation or funding from entities with financial interests in the outcomes.
 
 \paragraph{Data Availability.}
-All datasets used in this study are publicly available: WikiText-2 \cite{merity2016pointer} is available from Salesforce Research, and FineWeb-Edu is available from Hugging Face. The code, trained model checkpoints, and all experimental logs are available at \url{https://github.com/theapemachine/experiments}.
+All datasets used in this study are publicly available: WikiText-2 \cite{merity2016pointer} is available from Salesforce Research, and FineWeb-Edu is available from Hugging Face. The code, trained model checkpoints, and all experimental logs are available at \url{https://github.com/theapemachine/experiments}. For convenience and long-term artifact access, we also provide a mirror containing the original run directories (including all checkpoints) at \url{https://drive.google.com/drive/folders/1sQYMijP06a4Mf_1sEj_gLkE8OOEfUCB6?usp=drive_link}.
 
 \paragraph{Funding.}
 This research was conducted without external funding. All computational resources were provided by the author.
@@ -446,7 +453,7 @@ Table~\ref{tab:fineweb} reports mean $\pm$ std over three seeds. In the main tex
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\textwidth]{\detokenize{assets/m4max_seed1338_convergence.png}}
-\caption{Validation loss curves on FineWeb-Edu (100M tokens; seed 1338).}
+\caption{Validation loss curves on FineWeb-Edu (100M-token dataset; seed 1338).}
 \label{fig:convergence_fineweb_seed1338}
 \end{figure}
 
@@ -481,7 +488,7 @@ Table~\ref{tab:fineweb} reports mean $\pm$ std over three seeds. In the main tex
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\textwidth]{\detokenize{assets/m4max_seed1339_convergence.png}}
-\caption{Validation loss curves on FineWeb-Edu (100M tokens; seed 1339).}
+\caption{Validation loss curves on FineWeb-Edu (100M-token dataset; seed 1339).}
 \label{fig:convergence_fineweb_seed1339}
 \end{figure}
 
@@ -513,10 +520,14 @@ Table~\ref{tab:fineweb} reports mean $\pm$ std over three seeds. In the main tex
 \label{fig:kv_memory_128k_seed1339}
 \end{figure}
 
-\section{Effective Rank Evidence (Projected \texorpdfstring{$W_Q/W_K$}{WQ/WK})}
+\section{Effective Rank Evidence (Q/K Projection Activations)}
 \label{app:effective_rank}
 
-We compute singular value spectra and entropy-based effective rank for the $W_Q$/$W_K$ projection matrices in trained checkpoints. The script to reproduce this figure is included in the repository; the figure below is generated automatically when that script is run.
+We compute singular value spectra and entropy-based effective rank for the \textit{Q/K projection activations} (post-linear outputs feeding attention) in trained checkpoints, by capturing projection outputs on a fixed token slice and computing singular values of their empirical covariance. We use the standard entropy effective rank:
+\[
+\mathrm{eRank} = \exp(H(p)), \quad p_i=\frac{\sigma_i}{\sum_j \sigma_j},
+\]
+where $\{\sigma_i\}$ are singular values and $H(\cdot)$ is Shannon entropy. The script to reproduce this figure is included in the repository; the figure below is generated automatically when that script is run.
 
 \begin{figure}[htbp]
 \centering
@@ -526,7 +537,7 @@ We compute singular value spectra and entropy-based effective rank for the $W_Q$
   \fbox{\parbox{0.92\textwidth}{\textbf{Missing figure:} \path{assets/m4max_rank_evidence.png}.\\
   Run the rank analysis script to generate this figure.}}
 }
-\caption{Singular value spectra and entropy-based effective rank for $W_Q$ and $W_K$ across layers (example: v29 checkpoints).}
+\caption{Singular value spectra and entropy-based effective rank for Q/K projection activations across layers (example: v29 checkpoints).}
 \label{fig:rank_evidence}
 \end{figure}
 
@@ -628,6 +639,52 @@ To complement the theoretical KV-cache scaling analysis, we include two lightwei
 \caption{Passkey needle-in-a-haystack probe. Top row: strict next-token accuracy (often all-zero for base LMs). Middle/bottom: likelihood-based needle effect metrics which remain informative even when strict accuracy is zero. Figures are generated by \texttt{test\_needle\_haystack\_v29.py}.}
 \label{fig:needle_haystack_appendix}
 \end{figure}
+
+\section{Decoupled Ablations (v29; Seed 1337)}
+\label{app:decoupled_ablations}
+
+To support claims about optional stabilizers (null token, tied Q--K projections) and positional encoding, we report a small ablation suite for Decoupled 48/96 on FineWeb-Edu (6000 steps; seed 1337). Lower is better.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Decoupled 48/96 ablations (FineWeb-Edu v29; seed 1337; 6000 steps).}
+\label{tab:decoupled_ablations}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Variant} & \textbf{Best Val Loss} & \textbf{$\Delta$ vs base} \\
+\midrule
+Decoupled 48/96 (base) & 5.879 & +0.000 \\
+$-$ null token (\texttt{no\_null}) & 5.843 & $-0.035$ \\
+$+$ tied Q--K (\texttt{tie\_qk}) & 5.926 & $+0.047$ \\
+$+$ null token (\texttt{null}) & 6.395 & $+0.516$ \\
+$-$ RoPE (\texttt{no\_rope}) & 6.446 & $+0.567$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Baseline Fairness Checks (v29; Seed 1337)}
+\label{app:baseline_fairness}
+
+To address concerns that the full-rank baseline might be under-tuned under a short training horizon, we report (i) a small learning-rate sweep for the baseline at 6000 steps and (ii) a longer-horizon comparison at 12000 steps (seed 1337). Lower is better.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Baseline LR sweep and longer-horizon comparison (FineWeb-Edu v29; seed 1337).}
+\label{tab:baseline_fairness}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Run} & \textbf{Steps} & \textbf{Best Val Loss} \\
+\midrule
+Baseline ($3\times 10^{-4}$) & 6000 & 6.296 \\
+Baseline ($2\times 10^{-4}$) & 6000 & 6.052 \\
+Baseline ($4\times 10^{-4}$) & 6000 & 6.791 \\
+Baseline ($3\times 10^{-4}$) & 12000 & 6.133 \\
+Decoupled 48/96 ($3\times 10^{-4}$) & 12000 & 5.657 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % ============================================================================
 % REFERENCES

@@ -184,6 +184,10 @@ def main() -> None:
 
     ap.add_argument("--variant", type=str, default="decoupled", choices=["baseline", "gqa_kv2", "bottleneck", "decoupled"])
 
+    # Optional stabilizers / inductive biases (make opt-in; can be workload-dependent)
+    ap.add_argument("--null-attn", dest="null_attn", action="store_true", default=False, help="Enable learnable null token (attend-nowhere).")
+    ap.add_argument("--tie-qk", dest="tie_qk", action="store_true", default=False, help="Tie Q/K projections where supported (not supported for gqa unless kv_head==n_head).")
+
     # 1B-ish model (≈0.98–1.05B depending on vocab/emb details)
     ap.add_argument("--d-model", type=int, default=1536)
     ap.add_argument("--layers", type=int, default=24)
@@ -238,9 +242,12 @@ def main() -> None:
     if args.variant == "baseline":
         variant_args = ("--attn-mode", "standard")
     elif args.variant == "gqa_kv2":
+        # Note: tie_qk is not supported for gqa unless kv_head == n_head; we keep it off here.
+        if bool(args.tie_qk):
+            raise SystemExit("--tie-qk is not supported for --variant gqa_kv2 (kv_head=2).")
         variant_args = ("--attn-mode", "gqa", "--kv-head", "2", "--attn-dim", str(int(args.d_model)))
     elif args.variant == "bottleneck":
-        variant_args = ("--attn-mode", "bottleneck", "--attn-dim", str(attn_dim), "--null-attn")
+        variant_args = ("--attn-mode", "bottleneck", "--attn-dim", str(attn_dim))
     else:
         # decoupled
         variant_args = (
@@ -252,9 +259,15 @@ def main() -> None:
             str(sem_dim),
             "--geo-dim",
             str(geo_dim),
-            "--tie-qk",
-            "--null-attn",
         )
+
+    # Append optional stabilizers where supported
+    extra_flags: List[str] = []
+    if bool(args.null_attn):
+        extra_flags.append("--null-attn")
+    if bool(args.tie_qk):
+        # safe: baseline/bottleneck/decoupled support tie-qk; gqa_kv2 blocked above
+        extra_flags.append("--tie-qk")
 
     out_dir = _resolve_out_dir(args.run_root, args.tag, args.variant, args.seed, args.if_exists)
 
@@ -342,7 +355,7 @@ def main() -> None:
         str(args.live),
         "--param-dtype",
         str(args.param_dtype),
-    ] + list(variant_args)
+    ] + list(variant_args) + extra_flags
 
     if args.grad_checkpoint:
         argv.append("--grad-checkpoint")

@@ -38,20 +38,45 @@ SIZE_PRESETS: Dict[str, Dict[str, Any]] = {
     "small": dict(d_model=768, layers=12, n_head=12, d_ff=3072, block=1024, batch_size=8, steps=10000),
     "medium": dict(d_model=1024, layers=24, n_head=16, d_ff=4096, block=2048, batch_size=4, steps=15000),
     "large": dict(d_model=1536, layers=24, n_head=16, d_ff=6144, block=2048, batch_size=2, steps=20000),
+    # "Humor me" 1B-ish preset for production training/sampling.
+    # Keep depth moderate and width large; still requires accumulation/curriculum on single device.
+    "1b": dict(d_model=2048, layers=18, n_head=16, d_ff=8192, block=4096, batch_size=1, steps=20000),
 }
 
 # Attention dims for the "paper_*" experiments.
 BOTTLENECK_ATTN_DIM: Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288}
-DECOUPLED_SEM_DIM: Dict[str, int] = {"tiny": 32, "small": 48, "medium": 64, "large": 96}
-DECOUPLED_GEO_DIM: Dict[str, int] = {"tiny": 64, "small": 96, "medium": 128, "large": 192}
-DECOUPLED_ATTN_DIM: Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288}
-GQA_KV_HEAD: Dict[str, int] = {"tiny": 2, "small": 3, "medium": 4, "large": 4}
+DECOUPLED_SEM_DIM: Dict[str, int] = {"tiny": 32, "small": 48, "medium": 64, "large": 96, "1b": 256}
+DECOUPLED_GEO_DIM: Dict[str, int] = {"tiny": 64, "small": 96, "medium": 128, "large": 192, "1b": 512}
+# Keep attn_dim == sem_dim + geo_dim to preserve the decoupled "single SDPA call" training fast-path.
+DECOUPLED_ATTN_DIM: Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288, "1b": 768}
+GQA_KV_HEAD: Dict[str, int] = {"tiny": 2, "small": 3, "medium": 4, "large": 4, "1b": 4}
 
 EXP_PRESETS: Dict[str, Dict[str, Any]] = {
     "paper_baseline": dict(attn_mode="standard"),
     "paper_bottleneck": dict(attn_mode="bottleneck", null_attn=True),
     "paper_decoupled": dict(attn_mode="decoupled", tie_qk=True, null_attn=True, rope=True),
     "paper_gqa": dict(attn_mode="gqa"),
+    # Training-oriented preset (opt-in): keep SDPA fast path (null_attn=False) and enable common training speed/memory levers.
+    "train_decoupled_fast": dict(
+        attn_mode="decoupled",
+        tie_qk=True,
+        rope=True,
+        null_attn=False,
+        # training knobs (only applied if user didn't specify flags)
+        param_dtype="bf16",
+        amp=True,
+        amp_dtype="bf16",
+        grad_checkpoint=True,
+        compile=True,
+        compile_mode="reduce-overhead",
+        optimizer="lion",
+        lr=1e-4,
+        lr_schedule="cosine",
+        warmup_steps=200,
+        # Safety: if we ever hit non-finite loss/grads under mixed precision/compile, skip the step and reduce lr.
+        nan_policy="reduce_lr",
+        nan_lr_decay=0.5,
+    ),
 }
 
 
@@ -110,7 +135,8 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
         if exp == "paper_bottleneck":
             if not _argv_has_flag("--attn-dim"):
                 args.attn_dim = BOTTLENECK_ATTN_DIM[size]
-        if exp == "paper_decoupled":
+        # Any decoupled-mode preset should pick decoupled dims from the size table unless explicitly overridden.
+        if str(getattr(args, "attn_mode", "")) == "decoupled":
             if not _argv_has_flag("--sem-dim"):
                 args.sem_dim = DECOUPLED_SEM_DIM[size]
             if not _argv_has_flag("--geo-dim"):
@@ -138,6 +164,36 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
                 args.no_rope = False
             else:
                 args.no_rope = True
+
+    # ---- Training/runtime knobs (best-effort; only set if user didn't specify the flag) ----
+    def set_if_missing(flag: str, attr: str, value: Any) -> None:
+        if not _argv_has_flag(flag):
+            setattr(args, attr, value)
+
+    if "param_dtype" in preset:
+        set_if_missing("--param-dtype", "param_dtype", str(preset["param_dtype"]))
+    if "amp" in preset and bool(preset["amp"]):
+        set_if_missing("--amp", "amp", True)
+    if "amp_dtype" in preset:
+        set_if_missing("--amp-dtype", "amp_dtype", str(preset["amp_dtype"]))
+    if "grad_checkpoint" in preset and bool(preset["grad_checkpoint"]):
+        set_if_missing("--grad-checkpoint", "grad_checkpoint", True)
+    if "compile" in preset and bool(preset["compile"]):
+        set_if_missing("--compile", "compile", True)
+    if "compile_mode" in preset:
+        set_if_missing("--compile-mode", "compile_mode", str(preset["compile_mode"]))
+    if "optimizer" in preset:
+        set_if_missing("--optimizer", "optimizer", str(preset["optimizer"]))
+    if "lr" in preset:
+        set_if_missing("--lr", "lr", float(preset["lr"]))
+    if "lr_schedule" in preset:
+        set_if_missing("--lr-schedule", "lr_schedule", str(preset["lr_schedule"]))
+    if "warmup_steps" in preset:
+        set_if_missing("--warmup-steps", "warmup_steps", int(preset["warmup_steps"]))
+    if "nan_policy" in preset:
+        set_if_missing("--nan-policy", "nan_policy", str(preset["nan_policy"]))
+    if "nan_lr_decay" in preset:
+        set_if_missing("--nan-lr-decay", "nan_lr_decay", float(preset["nan_lr_decay"]))
 
 
 def default_out_dir(args: argparse.Namespace) -> Optional[str]:

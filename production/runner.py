@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 
 def run_single(args: argparse.Namespace, device: torch.device) -> None:
@@ -314,12 +315,16 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     except Exception:
         pass
 
-    if args.compile and hasattr(torch, "compile"):
+    # torch.compile can be very expensive across many input shapes; for training autotune we
+    # intentionally skip compile so the probe finishes quickly and doesn't look "hung" while compiling.
+    if args.compile and hasattr(torch, "compile") and str(getattr(args, "train_autotune", "off")).lower() == "off":
         try:
             model = torch.compile(model, mode=str(args.compile_mode))
             print(f"torch.compile enabled (mode={args.compile_mode}).")
         except Exception as e:
             print(f"torch.compile failed, continuing without it: {e}")
+    elif args.compile and str(getattr(args, "train_autotune", "off")).lower() != "off":
+        print("[autotune] skipping torch.compile during training autotune (too slow across many shapes).")
 
     # AMP context
     amp_enabled = bool(getattr(args, "amp", False))
@@ -446,17 +451,175 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     t_start = time.time()
     tok_count = 0
 
+    def device_synchronize(dev: torch.device) -> None:
+        try:
+            if dev.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.synchronize(dev)
+            elif dev.type == "mps":
+                if hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
+                    torch.mps.synchronize()
+        except Exception:
+            pass
+
+    def get_device_mem_stats(dev: torch.device) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        try:
+            if dev.type == "cuda" and torch.cuda.is_available():
+                out["cuda_mem_alloc_bytes"] = float(torch.cuda.memory_allocated(dev))
+                out["cuda_mem_reserved_bytes"] = float(torch.cuda.memory_reserved(dev))
+            elif dev.type == "mps":
+                if hasattr(torch, "mps"):
+                    if hasattr(torch.mps, "current_allocated_memory"):
+                        out["mps_mem_alloc_bytes"] = float(torch.mps.current_allocated_memory())
+                    if hasattr(torch.mps, "driver_allocated_memory"):
+                        out["mps_mem_driver_bytes"] = float(torch.mps.driver_allocated_memory())
+        except Exception:
+            pass
+        return out
+
+    def _parse_seq_schedule(spec: Optional[str]) -> Optional[List[Tuple[int, int]]]:
+        if spec is None:
+            return None
+        spec = str(spec).strip()
+        if not spec:
+            return None
+        pairs: List[Tuple[int, int]] = []
+        for part in spec.split(","):
+            part = part.strip()
+            if not part or "@" not in part:
+                continue
+            a, b = part.split("@", 1)
+            try:
+                seq = int(a)
+                st = int(b)
+                pairs.append((st, seq))
+            except Exception:
+                continue
+        pairs.sort(key=lambda x: x[0])
+        return pairs if pairs else None
+
+    def _seq_len_for_step(step_idx: int, *, default_seq_len: int, schedule: Optional[List[Tuple[int, int]]]) -> int:
+        if not schedule:
+            return int(default_seq_len)
+        s = int(default_seq_len)
+        for st, ln in schedule:
+            if int(step_idx) >= int(st):
+                s = int(ln)
+            else:
+                break
+        return int(s)
+
+    def _parse_bs_ga_pair(s: str) -> Optional[Tuple[int, int]]:
+        s = str(s).strip().lower()
+        if not s:
+            return None
+        # Accept separators: "64x1", "64*1"
+        for sep in ("x", "*"):
+            if sep in s:
+                a, b = s.split(sep, 1)
+                try:
+                    bs = int(a.strip())
+                    ga = int(b.strip())
+                    if bs > 0 and ga > 0:
+                        return bs, ga
+                except Exception:
+                    return None
+        return None
+
+    def _parse_batch_schedule(spec: Optional[str]) -> Optional[List[Tuple[int, int, int]]]:
+        """'64x1@0,32x2@200' -> [(0,64,1),(200,32,2)] sorted by step."""
+        if spec is None:
+            return None
+        spec = str(spec).strip()
+        if not spec:
+            return None
+        out: List[Tuple[int, int, int]] = []
+        for part in spec.split(","):
+            part = part.strip()
+            if not part or "@" not in part:
+                continue
+            lhs, rhs = part.split("@", 1)
+            pair = _parse_bs_ga_pair(lhs)
+            if pair is None:
+                continue
+            try:
+                st = int(rhs.strip())
+            except Exception:
+                continue
+            bs, ga = pair
+            out.append((st, bs, ga))
+        out.sort(key=lambda t: t[0])
+        return out if out else None
+
+    def _batch_for_step(step_idx: int, schedule: Optional[List[Tuple[int, int, int]]], *, default_bs: int, default_ga: int) -> Tuple[int, int]:
+        if not schedule:
+            return int(default_bs), int(default_ga)
+        bs = int(default_bs)
+        ga = int(default_ga)
+        for st, b, g in schedule:
+            if int(step_idx) >= int(st):
+                bs = int(b)
+                ga = int(g)
+            else:
+                break
+        return int(max(1, bs)), int(max(1, ga))
+
+    def _parse_batch_by_seq(spec: Optional[str]) -> Optional[Dict[int, Tuple[int, int]]]:
+        """'512:64x1,1024:32x2' -> {512:(64,1), 1024:(32,2)}"""
+        if spec is None:
+            return None
+        spec = str(spec).strip()
+        if not spec:
+            return None
+        out: Dict[int, Tuple[int, int]] = {}
+        for part in spec.split(","):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            a, b = part.split(":", 1)
+            try:
+                seq = int(a.strip())
+            except Exception:
+                continue
+            pair = _parse_bs_ga_pair(b)
+            if pair is None:
+                continue
+            bs, ga = pair
+            out[int(seq)] = (int(bs), int(ga))
+        return out if out else None
+
+    def _batch_for_seq(seq_len: int, mapping: Optional[Dict[int, Tuple[int, int]]], *, default_bs: int, default_ga: int) -> Tuple[int, int]:
+        """Conservative choice: pick mapping for the smallest seq_key >= current seq_len (or max key)."""
+        if not mapping:
+            return int(default_bs), int(default_ga)
+        keys = sorted(int(k) for k in mapping.keys())
+        chosen_key = keys[-1]
+        for k in keys:
+            if int(k) >= int(seq_len):
+                chosen_key = int(k)
+                break
+        bs, ga = mapping[chosen_key]
+        return int(max(1, bs)), int(max(1, ga))
+
     def estimate_loss(eval_iters: int) -> Tuple[float, float]:
         model.eval()
         losses_tr: List[float] = []
         losses_va: List[float] = []
+        eval_seq = int(getattr(args, "eval_seq_len", 0) or 0)
+        bs = int(getattr(args, "batch_size", 1))
+        if eval_seq <= 0:
+            eval_seq = int(getattr(args, "train_seq_len", 0) or 0)
+        if eval_seq <= 0:
+            eval_seq = int(args.block)
+        eval_seq = int(min(max(2, eval_seq), int(cfg.block_size)))
+
         for _ in range(int(eval_iters)):
-            xb, yb = get_batch_any(train_view, batch_size=int(args.batch_size), block_size=int(args.block), device=device)
+            xb, yb = get_batch_any(train_view, batch_size=bs, block_size=eval_seq, device=device)
             with autocast_ctx():
                 logits, _ = model(xb)
                 loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
             losses_tr.append(float(loss.detach().to("cpu").item()))
-            xb, yb = get_batch_any(val_view, batch_size=int(args.batch_size), block_size=int(args.block), device=device)
+            xb, yb = get_batch_any(val_view, batch_size=bs, block_size=eval_seq, device=device)
             with autocast_ctx():
                 logits, _ = model(xb)
                 loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
@@ -464,59 +627,312 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         model.train()
         return float(sum(losses_tr) / max(1, len(losses_tr))), float(sum(losses_va) / max(1, len(losses_va)))
 
+    # Training schedule: interpret schedule steps in optimizer-step space (v29/v30 semantics).
+    seq_schedule = _parse_seq_schedule(getattr(args, "seq_schedule", None))
+    batch_schedule = _parse_batch_schedule(getattr(args, "batch_schedule", None))
+    batch_by_seq = _parse_batch_by_seq(getattr(args, "batch_by_seq", None))
+    base_seq_len = int(getattr(args, "train_seq_len", 0) or 0)
+    if base_seq_len <= 0:
+        base_seq_len = int(cfg.block_size)
+    base_seq_len = int(min(max(2, base_seq_len), int(cfg.block_size)))
+
+    grad_accum_default = max(1, int(getattr(args, "grad_accum", 1)))
+    micro_bs_default = max(1, int(getattr(args, "batch_size", 1)))
+
+    # Opt-in training autotune: run short probes and exit (no training run performed).
+    if str(getattr(args, "train_autotune", "off")).lower() != "off":
+        mode = str(getattr(args, "train_autotune", "off")).lower()
+        if mode == "quick":
+            target_gbs = max(1, int(getattr(args, "train_autotune_gbs", 64)))
+            try:
+                bs_list = [int(x) for x in str(getattr(args, "train_autotune_batch_sizes", "")).split(",") if x.strip()]
+            except Exception:
+                bs_list = [1, 2, 4, 8, 16, 24, 32, 48, 64]
+            # Try larger micro-batches first: they tend to be faster (less grad-accum overhead) and this
+            # avoids spending forever benchmarking tiny microbatches (e.g. bs=1, ga=64).
+            bs_list = sorted({max(1, int(x)) for x in bs_list}, reverse=True)
+            try:
+                seq_list = [int(x) for x in str(getattr(args, "train_autotune_seq_lens", "")).split(",") if x.strip()]
+            except Exception:
+                seq_list = [512, 1024, 2048]
+            seq_list = [min(int(cfg.block_size), max(2, int(s))) for s in seq_list]
+            seq_list = sorted({int(s) for s in seq_list})
+            warm = max(0, int(getattr(args, "train_autotune_warmup", 1)))
+            iters = max(1, int(getattr(args, "train_autotune_iters", 3)))
+            max_driver_gb = float(getattr(args, "train_autotune_max_driver_gb", 0.0) or 0.0)
+
+            def mem_driver_gb() -> float:
+                m = get_device_mem_stats(device)
+                if device.type == "mps":
+                    b = float(m.get("mps_mem_driver_bytes", 0.0))
+                elif device.type == "cuda":
+                    b = float(m.get("cuda_mem_reserved_bytes", 0.0))
+                else:
+                    b = 0.0
+                return b / (1024.0**3)
+
+            print("[autotune] production training autotune enabled: probing candidates and then exiting.")
+            best: Optional[Dict[str, Any]] = None
+            best_by_seq: Dict[int, Dict[str, Any]] = {}
+            for s in seq_list:
+                print(f"[autotune] seq_len={s} (<= block={cfg.block_size})")
+                best_s: Optional[Dict[str, Any]] = None
+                for bs_try in bs_list:
+                    # MPSGraph limitation: some ops (notably large logits tensors) fail when tensor numel exceeds INT_MAX.
+                    # A practical proxy is B * T * vocab_size for logits in cross-entropy.
+                    if device.type == "mps":
+                        try:
+                            max_elems = 2_147_483_647  # INT_MAX
+                            logits_elems = int(bs_try) * int(s) * int(cfg.vocab_size)
+                            if logits_elems > max_elems:
+                                print(f"[autotune]   skipping bs={bs_try} (B*T*V={logits_elems} > INT_MAX) on MPS")
+                                continue
+                        except Exception:
+                            pass
+                    ga_try = max(1, target_gbs // bs_try)
+                    gbs_eff = bs_try * ga_try
+                    if gbs_eff < max(1, target_gbs // 4):
+                        continue
+                    print(f"[autotune]   trying bs={bs_try} ga={ga_try} (gbs={gbs_eff}) ...")
+                    ok = True
+                    peak = mem_driver_gb()
+                    tok = 0
+                    try:
+                        model.train()
+                        for _ in range(warm):
+                            opt.zero_grad(set_to_none=True)
+                            for _m in range(ga_try):
+                                xb, yb = get_batch_any(train_view, batch_size=bs_try, block_size=s, device=device)
+                                with autocast_ctx():
+                                    logits, _ = model(xb)
+                                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                                (loss / ga_try).backward()
+                            if float(getattr(args, "grad_clip", 0.0)) > 0:
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
+                            opt.step()
+                            peak = max(peak, mem_driver_gb())
+                        device_synchronize(device)
+                        t0 = time.perf_counter()
+                        for _ in range(iters):
+                            opt.zero_grad(set_to_none=True)
+                            for _m in range(ga_try):
+                                xb, yb = get_batch_any(train_view, batch_size=bs_try, block_size=s, device=device)
+                                with autocast_ctx():
+                                    logits, _ = model(xb)
+                                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                                (loss / ga_try).backward()
+                            if float(getattr(args, "grad_clip", 0.0)) > 0:
+                                torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
+                            opt.step()
+                            tok += int(bs_try) * int(ga_try) * int(s)
+                            peak = max(peak, mem_driver_gb())
+                            if max_driver_gb > 0 and peak > max_driver_gb:
+                                ok = False
+                                break
+                        device_synchronize(device)
+                        dt = time.perf_counter() - t0
+                        tok_s = float(tok / max(dt, 1e-9)) if ok else 0.0
+                    except Exception as e:
+                        ok = False
+                        tok_s = 0.0
+                        print(f"[autotune] bs={bs_try} ga={ga_try} (gbs={gbs_eff}) failed: {e}")
+                    rec = {"seq_len": int(s), "batch_size": int(bs_try), "grad_accum": int(ga_try), "gbs": int(gbs_eff), "tok_s": float(tok_s), "peak_driver_gb": float(peak), "ok": bool(ok)}
+                    if ok:
+                        print(f"[autotune]     ok tok/s={tok_s:.0f} peak_driver={peak:.1f}GB")
+                    if ok and (best_s is None or rec["tok_s"] > float(best_s["tok_s"])):
+                        best_s = rec
+                if best_s is not None:
+                    print(f"[autotune] best@{s}: tok/s={best_s['tok_s']:.0f} bs={best_s['batch_size']} ga={best_s['grad_accum']} peak_driver={best_s['peak_driver_gb']:.1f}GB")
+                    best = best_s  # keep last (largest seq in list) best
+                    best_by_seq[int(s)] = dict(best_s)
+            if best is not None:
+                print("[autotune] recommendation (copy/paste): "
+                      f"--batch-size {best['batch_size']} --grad-accum {best['grad_accum']} --train-seq-len {best['seq_len']}")
+            if best_by_seq:
+                parts = []
+                for seq_k in sorted(best_by_seq.keys()):
+                    r = best_by_seq[seq_k]
+                    parts.append(f"{int(seq_k)}:{int(r['batch_size'])}x{int(r['grad_accum'])}")
+                print('[autotune] batch-by-seq suggestion (copy/paste): --batch-by-seq "' + ",".join(parts) + '"')
+            print("[autotune] done. Exiting now (no training run performed).")
+            return
+
+    # Timing accumulators for throughput measurement (optimizer steps)
+    dt_acc = 0.0
+    tok_acc = 0
+    fwd_acc = 0.0
+    bwd_acc = 0.0
+    opt_acc = 0.0
+    steps_in_acc = 0
+
+    # Non-finite handling (opt-in via --nan-policy)
+    nan_policy = str(getattr(args, "nan_policy", "error")).lower()
+    nan_lr_decay = float(getattr(args, "nan_lr_decay", 0.5) or 0.5)
+    lr_mult = 1.0
+
     model.train()
     opt.zero_grad(set_to_none=True)
-    for step in range(int(args.steps)):
-        last_step = step + 1
+
+    legacy_micro = bool(getattr(args, "legacy_micro_steps", False))
+    if legacy_micro:
+        print("[warn] --legacy-micro-steps enabled: interpreting --steps as micro-steps (legacy behavior).")
+        if batch_schedule or batch_by_seq:
+            raise ValueError("--batch-schedule/--batch-by-seq are defined in optimizer-step space and are incompatible with --legacy-micro-steps.")
+
+    total_opt_steps = int(args.steps) if not legacy_micro else int(math.ceil(int(args.steps) / max(1, grad_accum_default)))
+
+    for opt_step in range(1, total_opt_steps + 1):
+        last_step = opt_step
 
         # LR schedule
         lr = lr_for_step(
-            step,
+            opt_step - 1,
             base_lr=float(args.lr),
             total_steps=int(args.steps),
             schedule=str(args.lr_schedule),
             warmup_steps=int(args.warmup_steps),
             min_lr=float(args.min_lr),
         )
+        lr = float(lr) * float(lr_mult)
         for pg in opt.param_groups:
             pg["lr"] = lr
 
-        xb, yb = get_batch_any(train_view, batch_size=int(args.batch_size), block_size=int(args.block), device=device)
-        tok_count += int(xb.numel())
+        # Determine training seq length for this optimizer step (schedule is in optimizer-step space).
+        seq_len = _seq_len_for_step(opt_step - 1, default_seq_len=base_seq_len, schedule=seq_schedule)
+        seq_len = int(min(max(2, seq_len), int(cfg.block_size)))
 
-        with autocast_ctx():
-            logits, _ = model(xb)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
-            loss = loss / max(1, int(args.grad_accum))
+        # Determine batch/accum for this step.
+        micro_bs, grad_accum = micro_bs_default, grad_accum_default
+        if batch_by_seq is not None:
+            micro_bs, grad_accum = _batch_for_seq(seq_len, batch_by_seq, default_bs=micro_bs, default_ga=grad_accum)
+        if batch_schedule is not None:
+            micro_bs, grad_accum = _batch_for_step(opt_step - 1, batch_schedule, default_bs=micro_bs, default_ga=grad_accum)
 
-        loss.backward()
+        # Proactive MPSGraph guard: avoid opaque runtime errors when the logits tensor is too large.
+        if device.type == "mps":
+            try:
+                max_elems = 2_147_483_647  # INT_MAX
+                logits_elems = int(micro_bs) * int(seq_len) * int(cfg.vocab_size)
+                if logits_elems > max_elems:
+                    raise ValueError(
+                        f"MPSGraph limitation hit: B*T*vocab_size={logits_elems} > INT_MAX. "
+                        f"Reduce --batch-size or --train-seq-len (or increase --grad-accum instead). "
+                        f"(batch_size={micro_bs}, seq_len={seq_len}, vocab_size={cfg.vocab_size})"
+                    )
+            except Exception:
+                pass
 
-        if (step + 1) % int(args.grad_accum) == 0:
-            if float(args.grad_clip) > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
-            opt.step()
+        t_step0 = time.perf_counter()
+        loss_sum = 0.0
+        nonfinite = False
+        # Backward over grad_accum microbatches.
+        for _micro in range(grad_accum):
+            xb, yb = get_batch_any(train_view, batch_size=micro_bs, block_size=seq_len, device=device)
+            tok_count += int(xb.numel())
+            tok_acc += int(xb.numel())
+            t1 = time.perf_counter()
+            with autocast_ctx():
+                logits, _ = model(xb)
+                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                loss_to_back = loss / grad_accum
+            fwd_acc += time.perf_counter() - t1
+            if not torch.isfinite(loss.detach()).all():
+                nonfinite = True
+                break
+            t2 = time.perf_counter()
+            loss_to_back.backward()
+            bwd_acc += time.perf_counter() - t2
+            loss_sum += float(loss.detach().to("cpu").item())
+
+        t3 = time.perf_counter()
+        if nonfinite:
+            # Clear grads to avoid contaminating future steps.
             opt.zero_grad(set_to_none=True)
+            if nan_policy == "reduce_lr":
+                lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
+                print(f"[warn] non-finite loss detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
+            elif nan_policy == "skip":
+                print(f"[warn] non-finite loss detected @ step {opt_step}; skipping optimizer step")
+            else:
+                raise RuntimeError(
+                    f"Non-finite loss detected at optimizer step {opt_step}. "
+                    f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, or disable --compile on MPS."
+                )
+        else:
+            grad_clip = float(getattr(args, "grad_clip", 0.0) or 0.0)
+            if grad_clip > 0:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                if not torch.isfinite(gn.detach()).all():
+                    nonfinite = True
+            if nonfinite:
+                opt.zero_grad(set_to_none=True)
+                if nan_policy == "reduce_lr":
+                    lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
+                    print(f"[warn] non-finite grads detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
+                elif nan_policy == "skip":
+                    print(f"[warn] non-finite grads detected @ step {opt_step}; skipping optimizer step")
+                else:
+                    raise RuntimeError(
+                        f"Non-finite gradients detected at optimizer step {opt_step}. "
+                        f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, or disable --compile on MPS."
+                    )
+            else:
+                opt.step()
+                opt.zero_grad(set_to_none=True)
+                opt_acc += time.perf_counter() - t3
 
-        if (step + 1) % int(args.log_every) == 0:
-            dt = time.time() - t_start
-            tok_s = (tok_count / dt) if dt > 0 else 0.0
-            ppl = float(math.exp(float(loss.detach().to("cpu").item() * max(1, int(args.grad_accum))))) if float(loss.detach().to("cpu").item()) < 20 else float("inf")
-            ev = {"type": "train", "step": step + 1, "loss": float(loss.detach().to("cpu").item() * max(1, int(args.grad_accum))), "ppl": ppl, "lr": lr, "tok_s": tok_s}
+        if bool(getattr(args, "sync_timing", False)):
+            device_synchronize(device)
+        dt = time.perf_counter() - t_step0
+        dt_acc += dt
+        steps_in_acc += 1
+
+        # Logging (optimizer steps)
+        if int(args.log_every) > 0 and (opt_step % int(args.log_every) == 0 or opt_step == 1):
+            tok_s = float(tok_acc / max(dt_acc, 1e-9))
+            loss_avg = float(loss_sum / max(1, grad_accum))
+            ppl = float(math.exp(loss_avg)) if loss_avg < 20 else float("inf")
+            ev = {
+                "type": "train",
+                "step": int(opt_step),
+                "loss": float(loss_avg),
+                "ppl": float(ppl),
+                "lr": float(lr),
+                "tok_s": float(tok_s),
+                "seq_len": int(seq_len),
+                "gbs": int(micro_bs * grad_accum),
+                "ms_step": float(1000.0 * dt_acc / max(1, steps_in_acc)),
+                "ms_fwd": float(1000.0 * fwd_acc / max(1, steps_in_acc)),
+                "ms_bwd": float(1000.0 * bwd_acc / max(1, steps_in_acc)),
+                "ms_opt": float(1000.0 * opt_acc / max(1, steps_in_acc)),
+                **get_device_mem_stats(device),
+            }
             if logger is not None:
                 logger.log(ev)
-            print(f"step {step+1}/{args.steps} loss={ev['loss']:.4f} ppl={ppl:.2f} lr={lr:.3g} tok/s={tok_s:.0f}")
+            print(
+                f"step {opt_step}/{total_opt_steps} loss={ev['loss']:.4f} ppl={ev['ppl']:.2f} "
+                f"lr={lr:.3g} tok/s={tok_s:.0f} seq={seq_len} gbs={ev['gbs']} "
+                f"ms/step={ev['ms_step']:.0f}"
+            )
+            # reset interval accumulators
+            dt_acc = 0.0
+            tok_acc = 0
+            fwd_acc = 0.0
+            bwd_acc = 0.0
+            opt_acc = 0.0
+            steps_in_acc = 0
 
-        if int(args.eval_every) > 0 and (step + 1) % int(args.eval_every) == 0:
+        if int(args.eval_every) > 0 and (opt_step % int(args.eval_every) == 0 or opt_step == total_opt_steps):
             tr_loss, va_loss = estimate_loss(int(args.eval_iters))
-            ev = {"type": "eval", "step": step + 1, "train_loss": tr_loss, "val_loss": va_loss}
+            ev = {"type": "eval", "step": opt_step, "train_loss": tr_loss, "val_loss": va_loss}
             if logger is not None:
                 logger.log(ev)
-            print(f"[eval] step {step+1}: train={tr_loss:.4f} val={va_loss:.4f}")
+            print(f"[eval] step {opt_step}: train={tr_loss:.4f} val={va_loss:.4f}")
             if va_loss < best_val:
                 best_val = va_loss
                 torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "best.pt"))
 
-        if int(args.save_every) > 0 and (step + 1) % int(args.save_every) == 0:
+        if int(args.save_every) > 0 and (opt_step % int(args.save_every) == 0):
             torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "last.pt"))
 
     torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "last.pt"))

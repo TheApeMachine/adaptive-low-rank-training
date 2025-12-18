@@ -14,7 +14,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # ---- Experiment suite controls (new in v27) ----
     # Import here so `--help` works even if other heavy deps are missing.
-    from production.config import SIZE_PRESETS
+    from production.config import SIZE_PRESETS, EXP_PRESETS
 
     ap.add_argument(
         "--size",
@@ -27,8 +27,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--exp",
         type=str,
         default=None,
-        choices=["paper_baseline", "paper_bottleneck", "paper_decoupled", "paper_gqa", "paper_all"],
-        help="Preset experiment configuration matching the paper suite. Applies only when provided.",
+        choices=sorted(list(EXP_PRESETS.keys()) + ["paper_all"]),
+        help="Preset experiment configuration. Applies only when provided.",
     )
     ap.add_argument(
         "--run-root",
@@ -154,8 +154,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # ---- Training ----
     ap.add_argument("--steps", type=int, default=6000)
+    ap.add_argument(
+        "--legacy-micro-steps",
+        action="store_true",
+        help="Legacy runner behavior: interpret --steps as micro-steps (optimizer steps happen every --grad-accum). "
+             "Default is optimizer-step semantics (v29/v30-compatible).",
+    )
     ap.add_argument("--batch-size", type=int, default=8, help="Micro-batch size (per optimizer step if --grad-accum=1).")
     ap.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps (global batch = batch_size * grad_accum).")
+    ap.add_argument(
+        "--batch-by-seq",
+        type=str,
+        default=None,
+        help="Optional mapping from training seq_len -> (batch_size, grad_accum). "
+             "Format: '512:64x1,1024:32x2,2048:8x8'. "
+             "At runtime we pick the entry tuned for the smallest seq >= current seq (or the max entry if current seq is larger). "
+             "Useful on MPS where (B*T*V) can hit INT_MAX at larger seq.",
+    )
+    ap.add_argument(
+        "--batch-schedule",
+        type=str,
+        default=None,
+        help="Optional batch/accum schedule in optimizer-step space. Format: '64x1@0,32x2@200,8x8@600'. "
+             "If set, overrides --batch-by-seq and --batch-size/--grad-accum.",
+    )
     ap.add_argument("--train-seq-len", type=int, default=0, help="Effective sequence length for training batches (0 = use --block).")
     ap.add_argument(
         "--seq-schedule",
@@ -165,6 +187,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--eval-seq-len", type=int, default=0, help="Eval sequence length (0 = match training seq-len).")
     ap.add_argument("--grad-checkpoint", action="store_true", help="Enable gradient checkpointing (recompute activations) to save memory.")
+    # Training autotune (opt-in): short microbench sweep to recommend batch/accum/seq_len for this device.
+    ap.add_argument(
+        "--train-autotune",
+        type=str,
+        default="off",
+        choices=["off", "quick"],
+        help="Opt-in training autotune. Runs short probes, prints a recommendation, then exits (no training).",
+    )
+    ap.add_argument("--train-autotune-gbs", type=int, default=64, help="Target global batch size for autotune (gbs = batch_size * grad_accum).")
+    # Defaults are intentionally small/fast for "quick" mode; override to widen the search.
+    ap.add_argument("--train-autotune-seq-lens", type=str, default="512", help="Comma-separated seq_lens to probe (clamped to --block).")
+    ap.add_argument("--train-autotune-batch-sizes", type=str, default="8,16,24,32,48,64", help="Comma-separated micro-batch sizes to try.")
+    ap.add_argument("--train-autotune-warmup", type=int, default=0, help="Warmup optimizer steps per candidate during autotune.")
+    ap.add_argument("--train-autotune-iters", type=int, default=1, help="Timed optimizer steps per candidate during autotune.")
+    ap.add_argument(
+        "--train-autotune-max-driver-gb",
+        type=float,
+        default=0.0,
+        help="If >0, reject candidates whose peak device driver allocation exceeds this (GB). On MPS uses mps driver bytes.",
+    )
     ap.add_argument(
         "--optimizer",
         type=str,
@@ -183,8 +225,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--opt-fused", action="store_true", help="Use fused optimizer implementation when available (CUDA only).")
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument(
+        "--nan-policy",
+        type=str,
+        default="error",
+        choices=["error", "skip", "reduce_lr"],
+        help="What to do if loss/grad becomes non-finite during training. "
+             "error: raise immediately. skip: skip the optimizer step. reduce_lr: skip + decay lr multiplier.",
+    )
+    ap.add_argument("--nan-lr-decay", type=float, default=0.5, help="When --nan-policy=reduce_lr, multiply lr by this factor on each non-finite event.")
     ap.add_argument("--save-every", type=int, default=0, help="Checkpoint interval (steps). 0 disables.")
-    ap.add_argument("--eval-every", type=int, default=200)
+    ap.add_argument("--eval-every", type=int, default=200, help="Eval interval (optimizer steps). 0 disables eval.")
     ap.add_argument("--eval-iters", type=int, default=20)
     ap.add_argument("--log-every", type=int, default=100, help="Train-step logging interval (JSONL + console).")
 
@@ -421,6 +472,17 @@ def run(args: argparse.Namespace) -> int:
 
     run_single(args, device)
     return 0
+
+
+def main() -> int:
+    """Module entrypoint so `python -m production.cli ...` works."""
+    ap = build_arg_parser()
+    args = ap.parse_args()
+    return int(run(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 

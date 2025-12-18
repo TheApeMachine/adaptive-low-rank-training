@@ -24,8 +24,19 @@ if TYPE_CHECKING:
 
 
 def neg_inf(dtype: torch.dtype) -> float:
-    # Safer than -inf on some backends.
-    return float(torch.finfo(dtype).min)
+    """
+    A large negative "mask" value.
+
+    Important: this must be representable in the *compute dtype* used by attention. On some backends
+    (notably torch.compile+inductor on MPS), constant-folding a float32-min sentinel into bf16 can
+    error with "cannot be converted to BFloat16 without overflow".
+    """
+    # Use a conservative finite sentinel that reliably zeroes softmax *and* is safely representable
+    # across fp16/bf16/fp32. This avoids torch.compile constant-folding failures when a float32-min
+    # sentinel gets cast into bf16/fp16.
+    #
+    # exp(-1e4) underflows to 0 for all practical purposes.
+    return -1.0e4
 
 
 # -----------------------------
@@ -473,7 +484,11 @@ class DecoupledBottleneckAttention(nn.Module):
     def _apply_logit_scale_to_q(self, q: torch.Tensor) -> torch.Tensor:
         if self.logit_scale is None:
             return q
-        return q * torch.exp(self.logit_scale.view(1, -1, 1, 1))
+        # Stability guard: learned temperatures can drift and exp() can overflow under mixed precision.
+        # Clamp in fp32, then cast to q dtype for the multiply.
+        s = self.logit_scale.float().clamp(min=-8.0, max=8.0)
+        scale = torch.exp(s).to(dtype=q.dtype).view(1, -1, 1, 1)
+        return q * scale
 
     def _sdp(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor]) -> torch.Tensor:
         dropout_p = self.cfg.dropout if self.training else 0.0
@@ -1315,7 +1330,18 @@ class DecoupledBottleneckAttention(nn.Module):
             geo_scale_t = geo_scale
 
         if cache is None:
-            # Full attention (training): materialize scores (research simplicity).
+            # Training / full-attn:
+            # Prefer SDPA for stability (it is much less prone to bf16 softmax overflow than the manual path).
+            if not cfg.null_attn:
+                # Combine sem+geo into a single SDPA call by concatenating along head_dim.
+                # q/k last-dim must match; v may have a different last-dim (v_head_dim).
+                q_cat = torch.cat([qsh * sem_scale_t, qgh * geo_scale_t], dim=-1)
+                k_cat = torch.cat([ksh, kgh], dim=-1)
+                out = self._sdp(q_cat, k_cat, vh, attn_mask=None if attn_mask is None else attn_mask)
+                y = self.out_proj(self._merge(out))
+                return y, None
+
+            # Null-attn path (manual).
             sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale_t
             geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale_t
             scores = sem + geo
@@ -1326,20 +1352,16 @@ class DecoupledBottleneckAttention(nn.Module):
                 keep = torch.tril(torch.ones((T, T), device=x.device, dtype=torch.bool)).view(1, 1, T, T)
                 scores = scores.masked_fill(~keep, ninfty)
 
-            if cfg.null_attn:
-                ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
-                kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
-                vn = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim)
-                s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale_t + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale_t)
-                scores = torch.cat([s_null, scores], dim=-1)
-                attn = F.softmax(scores, dim=-1)
-                attn = self.drop(attn)
-                vals = torch.cat([vn, vh], dim=-2)
-                out = torch.matmul(attn, vals)
-            else:
-                attn = F.softmax(scores, dim=-1)
-                attn = self.drop(attn)
-                out = torch.matmul(attn, vh)
+            ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
+            kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
+            vn = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim)
+            s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale_t + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale_t)
+            scores = torch.cat([s_null, scores], dim=-1)
+
+            attn = F.softmax(scores, dim=-1)
+            attn = self.drop(attn)
+            vals = torch.cat([vn, vh], dim=-2)
+            out = torch.matmul(attn, vals)
 
             y = self.out_proj(self._merge(out))
             return y, None

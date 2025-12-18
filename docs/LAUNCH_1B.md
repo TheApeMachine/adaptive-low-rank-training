@@ -106,6 +106,13 @@ Run it:
 python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy --run
 ```
 
+By default, the launcher keeps optional stabilizers \textbf{off}. You can opt in if desired:
+
+```bash
+# Optional: enable null token / tie Q-K (workload-dependent)
+python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy --null-attn --tie-qk --run
+```
+
 You can also specify a **token budget** and let the launcher solve for steps:
 
 ```bash
