@@ -47,6 +47,26 @@ pip install torch numpy matplotlib seaborn tqdm
 make install_deps
 ```
 
+### Train a ~1B model on a rented GPU / Colab (CUDA)
+
+If you want the *easiest possible* kick-off for a single-GPU ~1B run, use the helper launcher:
+
+```bash
+# Install deps without touching your CUDA-enabled torch install:
+python3.12 -m pip install -r requirements_runtime.txt
+
+# (Optional) prepare data
+python3.12 prepare_fineweb.py --tokens 1B --output fineweb_1b.npy
+
+# Dry-run (prints the full v29 command):
+python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy
+
+# Actually run:
+python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy --run
+```
+
+More details + Colab notes are in `docs/LAUNCH_1B.md`.
+
 ### Setup
 
 ```bash

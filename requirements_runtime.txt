@@ -1,0 +1,10 @@
+numpy
+tiktoken
+datasets
+tqdm
+matplotlib
+tensorboard
+rich
+h5py
+
+

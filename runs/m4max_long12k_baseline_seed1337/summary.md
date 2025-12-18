@@ -1,9 +1,9 @@
 # Run Summary
 
-- Created: `2025-12-17T22:53:48+01:00`
-- Out dir: `runs/m4max_baseline_seed1339`
+- Created: `2025-12-18T00:56:48+01:00`
+- Out dir: `runs/m4max_long12k_baseline_seed1337`
 - Device: `mps`
-- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --vocab-size 50257 --steps 6000 --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --embed-dim 512 --optimizer lion --lr 3e-4 --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --eval-every 200 --eval-iters 20 --log-every 10 --instrument full --analysis-every 100 --live rich --param-dtype bf16 --amp --amp-dtype bf16 --seed 1339 --out-dir runs/m4max_baseline_seed1339 --attn-mode standard`
+- Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --vocab-size 50257 --steps 12000 --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --embed-dim 512 --optimizer lion --lr 3e-4 --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --eval-every 200 --eval-iters 20 --log-every 10 --instrument full --analysis-every 100 --live rich --param-dtype bf16 --amp --amp-dtype bf16 --seed 1337 --out-dir runs/m4max_long12k_baseline_seed1337 --attn-mode standard`
 
 ## Model Config
 
@@ -106,7 +106,7 @@
   "opt_foreach": false,
   "opt_fused": false,
   "optimizer": "lion",
-  "out_dir": "runs/m4max_baseline_seed1339",
+  "out_dir": "runs/m4max_long12k_baseline_seed1337",
   "param_dtype": "bf16",
   "print_config": false,
   "prompt_tokens": "0",
@@ -115,7 +115,7 @@
   "run_root": "runs",
   "run_tag": null,
   "save_every": 0,
-  "seed": 1339,
+  "seed": 1337,
   "self_opt": "none",
   "self_opt_block_n": "128",
   "self_opt_cache": null,
@@ -154,7 +154,7 @@
   "sem_dim": 32,
   "seq_schedule": "256@0,512@500,1024@2000",
   "size": null,
-  "steps": 6000,
+  "steps": 12000,
   "sync_timing": false,
   "tb": false,
   "temperature": 1.0,
@@ -168,17 +168,4 @@
   "weight_decay": 0.1
 }
 ```
-
-## Results
-
-- Last step: `6000`
-- Best val loss: `6.220188` (ppl `502.80`)
-- Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
-
-## KV Cache Memory (batch=1)
-
-- Baseline fp16 (standard attn) @ ctx=256: `9.00MB`
-- This run policy @ ctx=256: `9.00MB`
-- Compression vs fp16 baseline: `1.00×`
-- This run policy @ 128k: `4.39GB`
 

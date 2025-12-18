@@ -29,3 +29,6 @@ paper.fdb_latexmk
 paper.pdf
 paper.synctex.gz
 sources.md
+paper.fls
+paper.log
+paper.out
