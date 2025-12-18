@@ -46,13 +46,32 @@ def main() -> None:
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--len", type=int, default=2_000_000)
 
-    ap.add_argument("--rope-contexts", type=int, nargs="+", default=[1024, 2048, 4096, 8192])
+    ap.add_argument(
+        "--rope-contexts",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Optional explicit contexts to test. If omitted, test_rope_extrapolation_v29.py defaults are used.",
+    )
     ap.add_argument("--rope-batch-size", type=int, default=1)
     ap.add_argument("--rope-num-batches", type=int, default=50)
 
-    ap.add_argument("--needle-contexts", type=int, nargs="+", default=[512, 1024, 2048, 4096])
+    ap.add_argument(
+        "--needle-contexts",
+        type=int,
+        nargs="*",
+        default=[64, 128, 256],
+        help="Needle haystack context lengths (excluding query). Default: within-trained ctx for v29 (64,128,256).",
+    )
     ap.add_argument("--needle-depths", type=float, nargs="+", default=[0.1, 0.25, 0.5, 0.75, 0.9])
     ap.add_argument("--needle-trials", type=int, default=20)
+    ap.add_argument(
+        "--needle-prompt-style",
+        type=str,
+        default="qa",
+        choices=["qa", "key", "repeat"],
+        help="Prompt template for needle probe (default: qa).",
+    )
 
     ap.add_argument("--run", action="store_true", help="Execute (default prints commands).")
     args = ap.parse_args()
@@ -77,8 +96,6 @@ def main() -> None:
             str(int(args.offset)),
             "--len",
             str(int(args.len)),
-            "--contexts",
-            *[str(int(x)) for x in args.rope_contexts],
             "--batch-size",
             str(int(args.rope_batch_size)),
             "--num-batches",
@@ -86,6 +103,8 @@ def main() -> None:
             "--out",
             rope_out,
         ]
+        if args.rope_contexts is not None and len(args.rope_contexts) > 0:
+            rope_cmd += ["--contexts", *[str(int(x)) for x in args.rope_contexts]]
         if args.device:
             rope_cmd += ["--device", str(args.device)]
 
@@ -94,8 +113,10 @@ def main() -> None:
             "test_needle_haystack_v29.py",
             "--ckpt",
             ckpt_path,
+            "--prompt-style",
+            str(args.needle_prompt_style),
             "--context-lengths",
-            *[str(int(x)) for x in args.needle_contexts],
+            *[str(int(x)) for x in (args.needle_contexts or [])],
             "--depths",
             *[str(float(x)) for x in args.needle_depths],
             "--trials",

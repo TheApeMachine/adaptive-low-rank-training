@@ -42,7 +42,7 @@ We propose \textbf{Decoupled Bottleneck Attention}, an architectural modificatio
 \begin{itemize}
     \item \textbf{Up to 168$\times$ end-to-end KV-cache reduction} in a fixed-rank long-context scenario, where $\sim 42.7\times$ comes from architectural dimension reduction and an additional $4\times$ comes from standard 4-bit quantization (Section~2.6)
     \item \textbf{Evidence at two scales:} v21 WikiText-2 ablations show that bottlenecking attention can outperform a full-rank baseline; v29 FineWeb-Edu scaling runs show that decoupling (48/96) outperforms a standard baseline, GQA (kv=2), and a matched-rank bottleneck baseline (Table~\ref{tab:fineweb})
-    \item \textbf{Superior data efficiency compared to Grouped-Query Attention (GQA).} On FineWeb-Edu, our Decoupled Bottleneck model ($d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$; total $d_{\text{attn}}=144$) achieves lower validation loss than a GQA baseline with shared KV heads (kv=2) under the same training recipe (mean over two seeds: $5.851 \pm 0.038$ vs $6.259 \pm 0.062$), demonstrating that reducing the \textit{interaction rank} is a more effective compression strategy than head sharing.
+    \item \textbf{Superior data efficiency compared to Grouped-Query Attention (GQA).} On FineWeb-Edu, our Decoupled Bottleneck model ($d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$; total $d_{\text{attn}}=144$) achieves lower validation loss than a GQA baseline with shared KV heads (kv=2) under the same training recipe (mean over three seeds: $5.804 \pm 0.087$ vs $6.348 \pm 0.161$), demonstrating that reducing the \textit{interaction rank} is a more effective compression strategy than head sharing.
 \end{itemize}
 
 In our v21 WikiText-2 suite, a simple rank-96 bottleneck \textit{outperforms} the full rank-512 baseline (val loss 5.33 vs 5.37), suggesting that standard Transformers can over-allocate capacity to attention. In our v29 FineWeb-Edu suite, the Decoupled Bottleneck model achieves the best validation loss among baseline, GQA, and a matched-rank Bottleneck baseline (Table~\ref{tab:fineweb}).
@@ -270,22 +270,22 @@ To validate that our findings generalize beyond small datasets, we train on 100M
 \begin{table}[htbp]
 \centering
 \small
-\caption{FineWeb-Edu Validation Loss (100M tokens, 1024 context, 6000 steps; v29 suite; mean $\pm$ std over two seeds)}
+\caption{FineWeb-Edu Validation Loss (100M tokens, 1024 context, 6000 steps; v29 suite; mean $\pm$ std over three seeds)}
 \label{tab:fineweb}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
 \textbf{Model} & \textbf{Attn Config} & \textbf{Params} & \textbf{Val Loss} & \textbf{Val PPL} \\
 \midrule
-Standard Baseline & $d = 512$ & 139.8M & $6.467 \pm 0.242$ & $652.9 \pm 156.2$ \\
-GQA (kv=2) & 12Q/2KV & 128.0M & $6.259 \pm 0.062$ & $523.0 \pm 32.4$ \\
-Bottleneck (rank 144) & $d_{\text{attn}}=144$ & 116.8M & $6.458 \pm 0.095$ & $639.5 \pm 60.6$ \\
-\textbf{Decoupled 48/96} & $d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$ & \textbf{116.8M} & $\mathbf{5.851 \pm 0.038}$ & $\mathbf{347.8 \pm 13.4}$ \\
+Standard Baseline & $d = 512$ & 139.8M & $6.385 \pm 0.222$ & $602.9 \pm 140.4$ \\
+GQA (kv=2) & 12Q/2KV & 128.0M & $6.348 \pm 0.161$ & $576.5 \pm 95.5$ \\
+Bottleneck (rank 144) & $d_{\text{attn}}=144$ & 116.8M & $6.424 \pm 0.090$ & $617.9 \pm 56.9$ \\
+\textbf{Decoupled 48/96} & $d_{\text{sem}}{=}48, d_{\text{geo}}{=}96$ & \textbf{116.8M} & $\mathbf{5.804 \pm 0.087}$ & $\mathbf{332.3 \pm 28.5}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \paragraph{Scaling Observation.}
-On FineWeb-Edu (100M tokens), the Decoupled Bottleneck model \textit{outperformed} the Standard Baseline, a reduced-KV GQA baseline (kv=2), and a matched-rank Bottleneck baseline (Table~\ref{tab:fineweb}). We observe substantial run-to-run variability for the full-rank baseline under this short training regime; therefore, we report mean $\pm$ std over two seeds in Table~\ref{tab:fineweb}, and show representative learning curves for a single seed in Figure~\ref{fig:convergence_fineweb}.
+On FineWeb-Edu (100M tokens), the Decoupled Bottleneck model \textit{outperformed} the Standard Baseline, a reduced-KV GQA baseline (kv=2), and a matched-rank Bottleneck baseline (Table~\ref{tab:fineweb}). We observe substantial run-to-run variability for the full-rank baseline under this short training regime; therefore, we report mean $\pm$ std over three seeds in Table~\ref{tab:fineweb}, and show representative learning curves for a single seed in Figure~\ref{fig:convergence_fineweb}.
 
 \begin{figure}[htbp]
 \centering
@@ -438,10 +438,10 @@ This research was conducted without external funding. All computational resource
 % ============================================================================
 \appendix
 
-\section{Replication Plots for FineWeb-Edu (v29; Seed 1338)}
+\section{Replication Plots for FineWeb-Edu (v29; Seeds 1338 and 1339)}
 \label{app:v29_seed1338}
 
-Table~\ref{tab:fineweb} reports mean $\pm$ std over two seeds. In the main text, we show representative learning curves and summary plots for seed 1337; here we include the corresponding plots for seed 1338 to make the replication evidence explicit.
+Table~\ref{tab:fineweb} reports mean $\pm$ std over three seeds. In the main text, we show representative learning curves and summary plots for seed 1337; here we include the corresponding plots for seeds 1338 and 1339 to make the replication evidence explicit.
 
 \begin{figure}[htbp]
 \centering
@@ -476,6 +476,41 @@ Table~\ref{tab:fineweb} reports mean $\pm$ std over two seeds. In the main text,
 \includegraphics[width=0.85\textwidth]{\detokenize{assets/m4max_seed1338_kv_memory_128k.png}}
 \caption{Measured KV-cache memory at 128k context (v29; seed 1338).}
 \label{fig:kv_memory_128k_seed1338}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{\detokenize{assets/m4max_seed1339_convergence.png}}
+\caption{Validation loss curves on FineWeb-Edu (100M tokens; seed 1339).}
+\label{fig:convergence_fineweb_seed1339}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{\detokenize{assets/m4max_seed1339_early_convergence.png}}
+\caption{Early convergence view on FineWeb-Edu (seed 1339), highlighting the first phase of optimization.}
+\label{fig:early_convergence_fineweb_seed1339}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.8\textwidth]{\detokenize{assets/m4max_seed1339_comparison_bar.png}}
+\caption{Final validation loss comparison on FineWeb-Edu (v29; seed 1339). Lower is better.}
+\label{fig:comparison_bar_seed1339}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.8\textwidth]{\detokenize{assets/m4max_seed1339_pareto.png}}
+\caption{Quality--efficiency comparison on FineWeb-Edu (v29; seed 1339).}
+\label{fig:pareto_seed1339}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.85\textwidth]{\detokenize{assets/m4max_seed1339_kv_memory_128k.png}}
+\caption{Measured KV-cache memory at 128k context (v29; seed 1339).}
+\label{fig:kv_memory_128k_seed1339}
 \end{figure}
 
 \section{Effective Rank Evidence (Projected \texorpdfstring{$W_Q/W_K$}{WQ/WK})}
@@ -546,7 +581,51 @@ To complement the theoretical KV-cache scaling analysis, we include two lightwei
 }
 \caption{Decoupled}
 \end{subfigure}
-\caption{Passkey needle-in-a-haystack next-token probe. Figures are generated by \texttt{test\_needle\_haystack\_v29.py}.}
+\vspace{0.75em}
+
+\begin{subfigure}{0.49\textwidth}
+\centering
+\IfFileExists{assets/m4max_baseline_needle_haystack_delta_nll.png}{
+  \includegraphics[width=\textwidth]{\detokenize{assets/m4max_baseline_needle_haystack_delta_nll.png}}
+}{
+  \fbox{\parbox{0.95\textwidth}{\textbf{Missing:} \path{assets/m4max_baseline_needle_haystack_delta_nll.png}}}
+}
+\caption{Baseline: $\Delta$NLL (with needle $-$ no needle)}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.49\textwidth}
+\centering
+\IfFileExists{assets/m4max_decoupled_needle_haystack_delta_nll.png}{
+  \includegraphics[width=\textwidth]{\detokenize{assets/m4max_decoupled_needle_haystack_delta_nll.png}}
+}{
+  \fbox{\parbox{0.95\textwidth}{\textbf{Missing:} \path{assets/m4max_decoupled_needle_haystack_delta_nll.png}}}
+}
+\caption{Decoupled: $\Delta$NLL (with needle $-$ no needle)}
+\end{subfigure}
+
+\vspace{0.75em}
+
+\begin{subfigure}{0.49\textwidth}
+\centering
+\IfFileExists{assets/m4max_baseline_needle_haystack_log10_p_ratio.png}{
+  \includegraphics[width=\textwidth]{\detokenize{assets/m4max_baseline_needle_haystack_log10_p_ratio.png}}
+}{
+  \fbox{\parbox{0.95\textwidth}{\textbf{Missing:} \path{assets/m4max_baseline_needle_haystack_log10_p_ratio.png}}}
+}
+\caption{Baseline: $\log_{10}\!\left(p_{\text{with}}/p_{\text{without}}\right)$}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.49\textwidth}
+\centering
+\IfFileExists{assets/m4max_decoupled_needle_haystack_log10_p_ratio.png}{
+  \includegraphics[width=\textwidth]{\detokenize{assets/m4max_decoupled_needle_haystack_log10_p_ratio.png}}
+}{
+  \fbox{\parbox{0.95\textwidth}{\textbf{Missing:} \path{assets/m4max_decoupled_needle_haystack_log10_p_ratio.png}}}
+}
+\caption{Decoupled: $\log_{10}\!\left(p_{\text{with}}/p_{\text{without}}\right)$}
+\end{subfigure}
+
+\caption{Passkey needle-in-a-haystack probe. Top row: strict next-token accuracy (often all-zero for base LMs). Middle/bottom: likelihood-based needle effect metrics which remain informative even when strict accuracy is zero. Figures are generated by \texttt{test\_needle\_haystack\_v29.py}.}
 \label{fig:needle_haystack_appendix}
 \end{figure}
 

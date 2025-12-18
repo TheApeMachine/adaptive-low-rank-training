@@ -96,7 +96,13 @@ def main() -> None:
     ap.add_argument("--data-npy", type=str, required=True)
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--len", type=int, default=2_000_000, help="How many tokens to use from the stream")
-    ap.add_argument("--contexts", type=int, nargs="+", default=[1024, 2048, 4096, 8192])
+    ap.add_argument(
+        "--contexts",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Context lengths to test. Default: [train_ctx, 2x, 4x] (capped to <=8192).",
+    )
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--num-batches", type=int, default=50)
     ap.add_argument("--seed", type=int, default=1337)
@@ -112,6 +118,20 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     model.eval()
 
+    train_ctx = int(cfg.block_size)
+    if args.contexts is None or len(args.contexts) == 0:
+        # Default: train_ctx, 2x, 4x (cap to keep runtime reasonable for dense attention).
+        cands = [train_ctx, train_ctx * 2, train_ctx * 4]
+        contexts = []
+        for c in cands:
+            if c <= 8192:
+                contexts.append(int(c))
+        contexts = sorted(set(contexts))
+    else:
+        contexts = sorted(set(int(x) for x in args.contexts))
+
+    print(f"trained_ctx={train_ctx}")
+
     p = Path(args.data_npy)
     arr = np.load(p, mmap_mode="r")
     off = int(args.offset)
@@ -121,9 +141,11 @@ def main() -> None:
     toks = np.asarray(arr[off : off + n])
 
     results = []
-    for ctx in list(map(int, args.contexts)):
+    for ctx in contexts:
         _ensure_block_size(model, ctx, device)
-        print(f"ctx={ctx}: evaluating...", end=" ", flush=True)
+        ratio = float(ctx) / float(train_ctx) if train_ctx > 0 else float("nan")
+        tag = "within-train" if ratio <= 1.01 else f"{ratio:.1f}x"
+        print(f"ctx={ctx} ({tag}): evaluating...", end=" ", flush=True)
         loss, ppl = eval_ppl(
             model,
             toks,

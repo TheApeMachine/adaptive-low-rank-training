@@ -1,6 +1,6 @@
 # Run Summary
 
-- Created: `2025-12-18T02:34:32+01:00`
+- Created: `2025-12-18T03:52:33+01:00`
 - Out dir: `runs/m4max_long12k_decoupled_48_96_seed1337`
 - Device: `mps`
 - Command: `v29_transformer_decoupled_bottleneck_instrumented.py --mode train --device mps --data fineweb_100m.npy --data-format npy --vocab-size 50257 --steps 12000 --d-model 768 --layers 12 --n-head 12 --d-ff 3072 --embed-dim 512 --optimizer lion --lr 3e-4 --batch-size 8 --grad-accum 2 --train-seq-len 512 --seq-schedule 256@0,512@500,1024@2000 --eval-every 200 --eval-iters 20 --log-every 10 --instrument full --analysis-every 100 --live rich --param-dtype bf16 --amp --amp-dtype bf16 --seed 1337 --out-dir runs/m4max_long12k_decoupled_48_96_seed1337 --attn-mode decoupled --attn-dim 144 --sem-dim 48 --geo-dim 96`
@@ -168,4 +168,17 @@
   "weight_decay": 0.1
 }
 ```
+
+## Results
+
+- Last step: `12000`
+- Best val loss: `5.656770` (ppl `286.22`)
+- Files: `train.jsonl`, `analysis.h5` (if enabled), `analysis.png`, `best.pt`, `last.pt`
+
+## KV Cache Memory (batch=1)
+
+- Baseline fp16 (standard attn) @ ctx=256: `9.00MB`
+- This run policy @ ctx=256: `1.69MB`
+- Compression vs fp16 baseline: `5.33×`
+- This run policy @ 128k: `843.8MB`
 

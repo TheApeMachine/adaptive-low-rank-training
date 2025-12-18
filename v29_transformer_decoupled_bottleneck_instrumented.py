@@ -1294,8 +1294,20 @@ def get_batch(tokens_cpu: torch.Tensor, batch_size: int, block_size: int, device
 
 
 def neg_inf(dtype: torch.dtype) -> float:
-    # Safer than -inf on some backends.
-    return float(torch.finfo(dtype).min)
+    """
+    Backend-safe "negative infinity" sentinel.
+
+    Some backends (notably MPS) can throw overflow/conversion errors when writing extremely
+    negative values (e.g., finfo(bf16).min) into bf16 tensors via ops like masked_fill.
+
+    For masking in softmax attention, a moderate large negative is sufficient because
+    exp(very_negative) underflows to ~0. We therefore cap the magnitude for fp16/bf16.
+    """
+    # NOTE: We intentionally use the same constant for *all* dtypes to avoid
+    # accidental dtype/device interactions (e.g., a float32-min being cast into bf16).
+    # -1e4 is plenty negative for attention masking in practice.
+    _ = dtype  # kept for call-site readability / future specialization
+    return -1e4
 
 
 # -----------------------------
@@ -4153,20 +4165,49 @@ SIZE_PRESETS: Dict[str, Dict[str, Any]] = {
     "small":  dict(d_model=768,  layers=12, n_head=12, d_ff=3072, block=1024, batch_size=8,  steps=10000),
     "medium": dict(d_model=1024, layers=24, n_head=16, d_ff=4096, block=2048, batch_size=4,  steps=15000),
     "large":  dict(d_model=1536, layers=24, n_head=16, d_ff=6144, block=2048, batch_size=2,  steps=20000),
+    # "Humor me" 1B-ish preset:
+    # - The goal is to be close to ~1B parameters with conservative depth and a large width.
+    # - This is not guaranteed to fit on all devices; use --grad-accum and --seq-schedule aggressively.
+    "1b":     dict(d_model=2048, layers=18, n_head=16, d_ff=8192, block=2048, batch_size=1,  steps=20000),
 }
 
 # Attention dims for the "paper_*" experiments (matching your table).
 BOTTLENECK_ATTN_DIM: Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288}
-DECOUPLED_SEM_DIM:   Dict[str, int] = {"tiny": 32, "small": 48,  "medium": 64,  "large": 96}
-DECOUPLED_GEO_DIM:   Dict[str, int] = {"tiny": 64, "small": 96,  "medium": 128, "large": 192}
-DECOUPLED_ATTN_DIM:  Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288}
-GQA_KV_HEAD:         Dict[str, int] = {"tiny": 2,  "small": 3,   "medium": 4,   "large": 4}
+DECOUPLED_SEM_DIM:   Dict[str, int] = {"tiny": 32, "small": 48,  "medium": 64,  "large": 96,  "1b": 256}
+DECOUPLED_GEO_DIM:   Dict[str, int] = {"tiny": 64, "small": 96,  "medium": 128, "large": 192, "1b": 512}
+# Note: the decoupled "single SDPA call" training fast-path concatenates (sem, geo) along the head_dim
+# and feeds V directly into SDPA. For maximal backend compatibility/perf, keep:
+#   attn_dim == sem_dim + geo_dim
+# This holds for the paper presets; keep it true for the 1B preset as well.
+DECOUPLED_ATTN_DIM:  Dict[str, int] = {"tiny": 96, "small": 144, "medium": 192, "large": 288, "1b": 768}
+GQA_KV_HEAD:         Dict[str, int] = {"tiny": 2,  "small": 3,   "medium": 4,   "large": 4,   "1b": 4}
 
 EXP_PRESETS: Dict[str, Dict[str, Any]] = {
     "paper_baseline": dict(attn_mode="standard"),
     "paper_bottleneck": dict(attn_mode="bottleneck", null_attn=True),
     "paper_decoupled": dict(attn_mode="decoupled", tie_qk=True, null_attn=True, rope=True),
     "paper_gqa": dict(attn_mode="gqa"),
+    # Training-oriented preset: keep SDPA fast path (null_attn=False) and enable the biggest wins
+    # that are actually implemented for training in this script.
+    "train_decoupled_fast": dict(
+        attn_mode="decoupled",
+        tie_qk=True,
+        rope=True,
+        null_attn=False,
+        # memory/speed levers
+        param_dtype="bf16",
+        amp=True,
+        amp_dtype="bf16",
+        grad_checkpoint=True,
+        compile=True,
+        compile_mode="reduce-overhead",
+        # optimizer: lower state memory than AdamW (important at ~1B)
+        optimizer="lion",
+        # a more conservative default lr for big models; still overrideable
+        lr=1e-4,
+        lr_schedule="cosine",
+        warmup_steps=200,
+    ),
 }
 
 def _argv_has_flag(flag: str) -> bool:
@@ -4222,7 +4263,9 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
         if exp == "paper_bottleneck":
             if not _argv_has_flag("--attn-dim"):
                 args.attn_dim = BOTTLENECK_ATTN_DIM[size]
-        if exp == "paper_decoupled":
+        # Any decoupled-mode preset should pick decoupled dims from the size table unless explicitly overridden.
+        # This keeps training-oriented presets (e.g. train_decoupled_fast) consistent with paper presets.
+        if str(getattr(args, "attn_mode", "")) == "decoupled":
             if not _argv_has_flag("--sem-dim"):
                 args.sem_dim = DECOUPLED_SEM_DIM[size]
             if not _argv_has_flag("--geo-dim"):
@@ -4250,6 +4293,36 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
                 args.no_rope = False
             else:
                 args.no_rope = True
+
+    # ---- Training / runtime knobs (best-effort) ----
+    # These are intentionally conservative: only set them when the user didn't specify the flag.
+    def set_if_missing(flag: str, attr: str, value: Any) -> None:
+        if not _argv_has_flag(flag):
+            setattr(args, attr, value)
+
+    # Dtypes / AMP / compile
+    if "param_dtype" in preset:
+        set_if_missing("--param-dtype", "param_dtype", str(preset["param_dtype"]))
+    if "amp" in preset and bool(preset["amp"]):
+        set_if_missing("--amp", "amp", True)
+    if "amp_dtype" in preset:
+        set_if_missing("--amp-dtype", "amp_dtype", str(preset["amp_dtype"]))
+    if "grad_checkpoint" in preset and bool(preset["grad_checkpoint"]):
+        set_if_missing("--grad-checkpoint", "grad_checkpoint", True)
+    if "compile" in preset and bool(preset["compile"]):
+        set_if_missing("--compile", "compile", True)
+    if "compile_mode" in preset:
+        set_if_missing("--compile-mode", "compile_mode", str(preset["compile_mode"]))
+
+    # Optimizer / schedule
+    if "optimizer" in preset:
+        set_if_missing("--optimizer", "optimizer", str(preset["optimizer"]))
+    if "lr" in preset:
+        set_if_missing("--lr", "lr", float(preset["lr"]))
+    if "lr_schedule" in preset:
+        set_if_missing("--lr-schedule", "lr_schedule", str(preset["lr_schedule"]))
+    if "warmup_steps" in preset:
+        set_if_missing("--warmup-steps", "warmup_steps", int(preset["warmup_steps"]))
 
 def default_out_dir(args: argparse.Namespace) -> Optional[str]:
     """
@@ -5864,8 +5937,8 @@ def main() -> None:
     ap.add_argument("--size", type=str, default=None, choices=list(SIZE_PRESETS.keys()),
                     help="Preset model+train size (tiny/small/medium/large). Applies only when provided.")
     ap.add_argument("--exp", type=str, default=None,
-                    choices=["paper_baseline", "paper_bottleneck", "paper_decoupled", "paper_gqa", "paper_all"],
-                    help="Preset experiment configuration matching the paper suite. Applies only when provided.")
+                    choices=sorted(list(EXP_PRESETS.keys()) + ["paper_all"]),
+                    help="Preset experiment configuration. Applies only when provided.")
     ap.add_argument("--run-root", type=str, default="runs", help="Root directory for auto run dirs when --out-dir is omitted.")
     ap.add_argument("--run-tag", type=str, default=None, help="Optional suffix for auto run dirs, e.g. 'seed2' -> runs/small_decoupled_seed2")
     ap.add_argument("--print-config", action="store_true", help="Print resolved config (after presets/overrides) and exit.")
@@ -5948,7 +6021,7 @@ def main() -> None:
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=0, help="Checkpoint interval (steps). 0 disables.")
-    ap.add_argument("--eval-every", type=int, default=200)
+    ap.add_argument("--eval-every", type=int, default=200, help="Eval interval (steps). 0 disables eval (including step-0 eval).")
     ap.add_argument("--eval-iters", type=int, default=20)
     ap.add_argument("--log-every", type=int, default=100, help="Train-step logging interval (JSONL + console).")
 
@@ -6280,6 +6353,65 @@ def _run_single(args: argparse.Namespace, device: torch.device) -> None:
     # -------------------------
     # Train mode
     # -------------------------
+    # If the user only wants a resolved config, don't require datasets/output dirs.
+    # This path is intentionally non-invasive: it exits before any training state is created.
+    if bool(getattr(args, "print_config", False)):
+        # Determine vocab size without scanning datasets (which can be extremely slow on big memmaps).
+        if args.vocab_size is not None:
+            vocab = int(args.vocab_size)
+        elif args.tokenizer == "tiktoken":
+            vocab = 50257
+        else:
+            # Default to a GPT-2-like vocab for config inspection; training runs should pass --vocab-size.
+            vocab = 50257
+            print("[warn] --vocab-size not provided; using 50257 for --print-config. (For real training, pass --vocab-size.)")
+
+        cfg = ModelConfig(
+            vocab_size=int(vocab),
+            block_size=int(args.block),
+            n_layer=int(args.layers),
+            n_head=int(args.n_head),
+            kv_head=args.kv_head,
+            d_model=int(args.d_model),
+            d_ff=int(args.d_ff),
+            embed_dim=int(args.embed_dim),
+            attn_mode=str(args.attn_mode),
+            attn_dim=int(args.attn_dim),
+            sem_dim=int(args.sem_dim),
+            geo_dim=int(args.geo_dim),
+            rope=(not args.no_rope),
+            rope_base=float(args.rope_base),
+            tie_qk=bool(args.tie_qk),
+            null_attn=bool(args.null_attn),
+            learned_temp=(not args.no_learned_temp),
+            mlp=str(args.mlp),
+            dropout=float(args.dropout),
+        )
+
+        print(json.dumps(asdict(cfg), indent=2, sort_keys=True))
+        try:
+            mem_ctx = estimate_kv_cache_bytes(
+                cfg, seq_len=cfg.block_size, batch=1,
+                kv_cache=args.kv_cache, kv_qblock=args.kv_qblock, kv_residual=args.kv_residual,
+                kv_cache_k=args.kv_cache_k, kv_cache_v=args.kv_cache_v,
+                kv_cache_k_sem=args.kv_cache_k_sem, kv_cache_k_geo=args.kv_cache_k_geo,
+                kv_qblock_k=args.kv_qblock_k, kv_qblock_v=args.kv_qblock_v,
+                kv_qblock_k_sem=args.kv_qblock_k_sem, kv_qblock_k_geo=args.kv_qblock_k_geo,
+            )
+            mem_128 = estimate_kv_cache_bytes(
+                cfg, seq_len=128_000, batch=1,
+                kv_cache=args.kv_cache, kv_qblock=args.kv_qblock, kv_residual=args.kv_residual,
+                kv_cache_k=args.kv_cache_k, kv_cache_v=args.kv_cache_v,
+                kv_cache_k_sem=args.kv_cache_k_sem, kv_cache_k_geo=args.kv_cache_k_geo,
+                kv_qblock_k=args.kv_qblock_k, kv_qblock_v=args.kv_qblock_v,
+                kv_qblock_k_sem=args.kv_qblock_k_sem, kv_qblock_k_geo=args.kv_qblock_k_geo,
+            )
+            print(f"KV cache @ ctx={cfg.block_size}: {human_bytes(mem_ctx['total_bytes'])}")
+            print(f"KV cache @ 128k: {human_bytes(mem_128['total_bytes'])}")
+        except Exception as e:
+            print(f"[warn] KV memory estimate failed: {e}")
+        return
+
     if args.data is None:
         raise ValueError("--data is required for --mode train")
     if args.out_dir is None:
@@ -6651,14 +6783,15 @@ def _run_single(args: argparse.Namespace, device: torch.device) -> None:
         return out
 
     try:
-        # Baseline eval at step 0
-        eval0 = do_eval(0, seq_len_hint=base_seq_len)
-        best_val = min(best_val, eval0["val_loss"])
-        eval0["best_val"] = best_val
-        if logger is not None:
-            logger.log(eval0)
-        dashboard.update_eval(eval0)
-        dashboard.message(f"eval@0: val_loss={eval0['val_loss']:.6f} val_ppl={eval0['val_ppl']:.2f}")
+        # Baseline eval at step 0 (optional; disable via --eval-every 0 for pure perf/mem sweeps).
+        if int(getattr(args, "eval_every", 0)) > 0:
+            eval0 = do_eval(0, seq_len_hint=base_seq_len)
+            best_val = min(best_val, eval0["val_loss"])
+            eval0["best_val"] = best_val
+            if logger is not None:
+                logger.log(eval0)
+            dashboard.update_eval(eval0)
+            dashboard.message(f"eval@0: val_loss={eval0['val_loss']:.6f} val_ppl={eval0['val_ppl']:.2f}")
 
         for step in range(1, args.steps + 1):
             step_idx = step - 1
@@ -6763,7 +6896,8 @@ def _run_single(args: argparse.Namespace, device: torch.device) -> None:
             steps_in_acc += 1
 
             # Eval / analysis checkpoints
-            if (step % args.eval_every) == 0 or step == args.steps:
+            eval_every = int(getattr(args, "eval_every", 0))
+            if eval_every > 0 and ((step % eval_every) == 0 or step == args.steps):
                 ev = do_eval(step, seq_len_hint=seq_len)
                 val_loss = ev["val_loss"]
                 if val_loss < best_val:
