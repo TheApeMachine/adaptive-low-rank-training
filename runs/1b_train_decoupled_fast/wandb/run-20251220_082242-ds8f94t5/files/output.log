@@ -1,0 +1,26 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/ds8f94t5
+[warn] non-finite grads detected @ step 1; skipping step and reducing lr_mult -> 0.5
+step 1/20000 loss=10.6771 ppl=43352.57 lr=5e-07 tok/s=1351 seq=512 gbs=64 ms/step=24255
+[warn] non-finite loss detected @ step 7; skipping step and reducing lr_mult -> 0.25
+[warn] non-finite loss detail: micro=4/8 loss=nan xb[min,max]=[0,25419079680] yb[min,max]=[1,50201] y_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/1b_train_decoupled_fast/nonfinite_loss_step7_micro3.pt
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 507, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 503, in main
+    return int(run(args))
+               ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 487, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 979, in run_single
+    loss_to_back.backward()
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_tensor.py", line 625, in backward
+    torch.autograd.backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/graph.py", line 841, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

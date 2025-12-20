@@ -1,0 +1,22 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/q2jvf4zx
+step 1/20000 loss=11.2434 ppl=76374.30 lr=5e-07 tok/s=1232 seq=512 gbs=64 ms/step=26593
+step 10/20000 loss=11.1430 ppl=69078.56 lr=5e-06 tok/s=1186 seq=512 gbs=64 ms/step=27638
+step 20/20000 loss=10.6948 ppl=44124.73 lr=1e-05 tok/s=1211 seq=512 gbs=64 ms/step=27055
+step 30/20000 loss=10.2836 ppl=29250.32 lr=1.5e-05 tok/s=1168 seq=512 gbs=64 ms/step=28061
+step 40/20000 loss=9.6166 ppl=15011.29 lr=2e-05 tok/s=1177 seq=512 gbs=64 ms/step=27849
+step 50/20000 loss=8.9197 ppl=7477.71 lr=2.5e-05 tok/s=1116 seq=512 gbs=64 ms/step=29375
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 516, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 512, in main
+    return int(run(args))
+               ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 496, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1055, in run_single
+    if not torch.isfinite(loss.detach()).all():
+    ^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

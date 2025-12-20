@@ -108,11 +108,15 @@ class GPT(nn.Module):
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = nn.LayerNorm(cfg.d_model)
 
-        self.register_buffer(
-            "causal_mask",
-            torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool)).view(1, 1, cfg.block_size, cfg.block_size),
-            persistent=False,
-        )
+        if cfg.null_attn:
+            self.register_buffer(
+                "causal_mask",
+                torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool)).view(1, 1, cfg.block_size, cfg.block_size),
+                persistent=False,
+            )
+        else:
+            # Saves memory for large block_size when null-attn is disabled (the common training fast-path).
+            self.register_buffer("causal_mask", torch.empty(0, dtype=torch.bool), persistent=False)
 
         self.apply(self._init_weights)
         self.grad_checkpointing = False
@@ -793,15 +797,24 @@ class GPT(nn.Module):
             next_id = torch.multinomial(probs, num_samples=1)
 
             if decode_tuner is not None and self.cfg.attn_mode == "decoupled":
-                # Provide a single-token query to the decode tuner to choose a plan per bucket.
-                # It will update cache.decode_block / cache.fused by applying the plan.
                 try:
-                    # This uses the first layer as representative.
+                    # v25/v30 self-opt: set per-layer decode knobs (decode_block, fused mode, kernel launch params).
+                    # Timing depends on shapes/prefix length, not on actual token values.
                     attn0 = self.blocks[0].attn
                     cache0 = caches[0]
-                    # We don't have direct access to q_sem/q_geo here without re-running attention internals,
-                    # so the runtime tuner is primarily used inside the attention forward when available.
-                    _ = (attn0, cache0)
+                    for c in caches:
+                        try:
+                            if bool(getattr(c.k_sem, "is_quantized", False) or getattr(c.k_geo, "is_quantized", False) or getattr(c.v, "is_quantized", False)):
+                                cache0 = c
+                                break
+                        except Exception:
+                            continue
+
+                    L_prefix = int(getattr(caches[0], "pos", out.size(1)))
+                    plan = decode_tuner.maybe_get_plan(attn=attn0, cache=cache0, L_prefix=L_prefix)
+                    if plan is not None:
+                        for c in caches:
+                            plan.apply_to_cache(c)
                 except Exception:
                     pass
 
@@ -1244,5 +1257,3 @@ class GPT(nn.Module):
                 self.train()
             if was_training_draft:
                 draft_model.train()
-
-

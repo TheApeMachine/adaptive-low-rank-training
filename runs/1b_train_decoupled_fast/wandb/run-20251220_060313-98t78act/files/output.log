@@ -1,0 +1,85 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/98t78act
+[warn] non-finite grads detected @ step 1; skipping step and reducing lr_mult -> 0.5
+step 1/20000 loss=9.9844 ppl=21686.40 lr=5e-07 tok/s=1360 seq=512 gbs=64 ms/step=24089
+[warn] non-finite grads detected @ step 2; skipping step and reducing lr_mult -> 0.25
+[warn] non-finite loss detected @ step 4; skipping step and reducing lr_mult -> 0.125
+[warn] non-finite loss detail: micro=8/8 loss=nan xb[min,max]=[0,4805156864] yb[min,max]=[1,50249] y_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/1b_train_decoupled_fast/nonfinite_loss_step4_micro7.pt
+[warn] non-finite loss detected @ step 10; skipping step and reducing lr_mult -> 0.0625
+[warn] non-finite loss detail: micro=1/8 loss=nan xb[min,max]=[0,36028797287399438] yb[min,max]=[0,36028797354508302] y_oob=306 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/1b_train_decoupled_fast/nonfinite_loss_step10_micro0.pt
+step 10/20000 loss=0.0000 ppl=1.00 lr=6.25e-07 tok/s=1375 seq=512 gbs=64 ms/step=21513
+[warn] non-finite loss detected @ step 18; skipping step and reducing lr_mult -> 0.0312
+[warn] non-finite loss detail: micro=1/8 loss=nan xb[min,max]=[0,36028797287399438] yb[min,max]=[0,36028797354508302] y_oob=342 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/1b_train_decoupled_fast/nonfinite_loss_step18_micro0.pt
+[warn] non-finite loss detected @ step 19; skipping step and reducing lr_mult -> 0.0156
+[warn] non-finite loss detail: micro=6/8 loss=nan xb[min,max]=[0,4400852992] yb[min,max]=[0,49757] y_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/1b_train_decoupled_fast/nonfinite_loss_step19_micro5.pt
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 507, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 503, in main
+    return int(run(args))
+               ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 487, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 906, in run_single
+    logits, _ = model(xb)
+                ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 414, in __call__
+    return super().__call__(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 832, in compile_wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/model.py", line 171, in forward
+    x = checkpoint(_blk_fwd, x, use_reentrant=False)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_compile.py", line 53, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1044, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/utils/checkpoint.py", line 503, in checkpoint
+    ret = function(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/model.py", line 168, in _blk_fwd
+    y, _ = blk(x_in, attn_mask=attn_mask, cache=None, pos_offset=pos_offset)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/model.py", line 92, in forward
+    a, cache = self.attn(self.ln1(x), attn_mask=attn_mask, cache=cache, pos_offset=pos_offset)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/attention.py", line 1368, in forward
+    out = self._sdp(q_cat, k_cat, vh, attn_mask=None if attn_mask is None else attn_mask, scale=1.0)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/attention.py", line 524, in _sdp
+    return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/utils/checkpoint.py", line 1129, in pack_hook
+    def pack_hook(x):
+
+KeyboardInterrupt

@@ -1,0 +1,32 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/ougme3fz
+step 1/20000 loss=11.2434 ppl=76374.30 lr=5e-07 tok/s=1278 seq=512 gbs=64 ms/step=25643
+step 10/20000 loss=11.1432 ppl=69091.73 lr=5e-06 tok/s=1045 seq=512 gbs=64 ms/step=31350
+step 20/20000 loss=10.6949 ppl=44131.06 lr=1e-05 tok/s=1050 seq=512 gbs=64 ms/step=31198
+step 30/20000 loss=10.2837 ppl=29251.91 lr=1.5e-05 tok/s=1206 seq=512 gbs=64 ms/step=27178
+step 40/20000 loss=9.6168 ppl=15014.98 lr=2e-05 tok/s=1124 seq=512 gbs=64 ms/step=29157
+step 50/20000 loss=8.9196 ppl=7477.07 lr=2.5e-05 tok/s=1181 seq=512 gbs=64 ms/step=27749
+step 60/20000 loss=8.3460 ppl=4213.45 lr=3e-05 tok/s=1225 seq=512 gbs=64 ms/step=26750
+step 70/20000 loss=7.7154 ppl=2242.52 lr=3.5e-05 tok/s=1241 seq=512 gbs=64 ms/step=26394
+step 80/20000 loss=7.3592 ppl=1570.51 lr=4e-05 tok/s=1222 seq=512 gbs=64 ms/step=26824
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 516, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 512, in main
+    return int(run(args))
+               ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 496, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1039, in run_single
+    "xb": xb.detach().to("cpu"),
+    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_tensor.py", line 625, in backward
+    torch.autograd.backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/graph.py", line 841, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

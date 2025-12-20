@@ -77,6 +77,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # ---- Compile / AMP ----
     ap.add_argument("--compile", action="store_true", help="Use torch.compile(...) for speed (experimental).")
+    ap.add_argument("--no-compile", action="store_true", help="Disable torch.compile even if a preset enables it.")
     ap.add_argument(
         "--compile-mode",
         type=str,
@@ -89,6 +90,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable torch.amp autocast (mixed precision) for training on CUDA/MPS/CPU (experimental).",
     )
+    ap.add_argument("--no-amp", action="store_true", help="Disable AMP even if a preset enables it.")
     ap.add_argument(
         "--amp-dtype",
         type=str,
@@ -187,6 +189,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--eval-seq-len", type=int, default=0, help="Eval sequence length (0 = match training seq-len).")
     ap.add_argument("--grad-checkpoint", action="store_true", help="Enable gradient checkpointing (recompute activations) to save memory.")
+    ap.add_argument("--no-grad-checkpoint", action="store_true", help="Disable gradient checkpointing even if a preset enables it.")
     # Training autotune (opt-in): short microbench sweep to recommend batch/accum/seq_len for this device.
     ap.add_argument(
         "--train-autotune",
@@ -446,6 +449,12 @@ def run(args: argparse.Namespace) -> int:
         args.tie_qk = False
     if getattr(args, "rope", False):
         args.no_rope = False
+    if getattr(args, "no_compile", False):
+        args.compile = False
+    if getattr(args, "no_amp", False):
+        args.amp = False
+    if getattr(args, "no_grad_checkpoint", False):
+        args.grad_checkpoint = False
 
     # Derive out_dir if omitted and size+exp provided
     inferred = default_out_dir(args)
@@ -505,6 +514,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
 

@@ -5,6 +5,7 @@ import contextlib
 import json
 import math
 import os
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -321,14 +322,28 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
 
     # torch.compile can be very expensive across many input shapes; for training autotune we
     # intentionally skip compile so the probe finishes quickly and doesn't look "hung" while compiling.
-    if args.compile and hasattr(torch, "compile") and str(getattr(args, "train_autotune", "off")).lower() == "off":
-        try:
-            model = torch.compile(model, mode=str(args.compile_mode))
-            print(f"torch.compile enabled (mode={args.compile_mode}).")
-        except Exception as e:
-            print(f"torch.compile failed, continuing without it: {e}")
-    elif args.compile and str(getattr(args, "train_autotune", "off")).lower() != "off":
+    compile_requested = bool(getattr(args, "compile", False))
+    compile_explicit = "--compile" in sys.argv
+    autotune_off = str(getattr(args, "train_autotune", "off")).lower() == "off"
+    if compile_requested and hasattr(torch, "compile") and autotune_off:
+        # MPS + torch.compile is still experimental and can introduce correctness issues for some models.
+        # Only enable it on MPS when the user explicitly asked for it via --compile.
+        if device.type == "mps" and not compile_explicit:
+            print("[warn] skipping torch.compile on MPS (pass --compile explicitly to force-enable).")
+        else:
+            try:
+                model = torch.compile(model, mode=str(args.compile_mode))
+                print(f"torch.compile enabled (mode={args.compile_mode}).")
+            except Exception as e:
+                print(f"torch.compile failed, continuing without it: {e}")
+    elif compile_requested and (not autotune_off):
         print("[autotune] skipping torch.compile during training autotune (too slow across many shapes).")
+
+    # Ensure training-only flags survive compile wrappers.
+    try:
+        model.grad_checkpointing = bool(args.grad_checkpoint)
+    except Exception:
+        pass
 
     # AMP context
     amp_enabled = bool(getattr(args, "amp", False))
@@ -524,6 +539,25 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                     torch.mps.synchronize()
         except Exception:
             pass
+
+    def _empty_device_cache(dev: torch.device) -> None:
+        try:
+            if dev.type == "cuda" and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif dev.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+
+    def _is_oom_error(e: BaseException) -> bool:
+        msg = str(e).lower()
+        return (
+            ("out of memory" in msg)
+            or ("cuda error: out of memory" in msg)
+            or ("cudnn error: out of memory" in msg)
+            or ("mps backend out of memory" in msg)
+            or ("resource exhausted" in msg)
+        )
 
     def get_device_mem_stats(dev: torch.device) -> Dict[str, float]:
         out: Dict[str, float] = {}
@@ -772,7 +806,10 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                                     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
                                 (loss / ga_try).backward()
                             if float(getattr(args, "grad_clip", 0.0)) > 0:
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
+                                if device.type == "mps":
+                                    _ = _clip_grad_norm_fp32(model.parameters(), float(args.grad_clip))
+                                else:
+                                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
                             opt.step()
                             peak = max(peak, mem_driver_gb())
                         device_synchronize(device)
@@ -786,7 +823,10 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                                     loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
                                 (loss / ga_try).backward()
                             if float(getattr(args, "grad_clip", 0.0)) > 0:
-                                torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
+                                if device.type == "mps":
+                                    _ = _clip_grad_norm_fp32(model.parameters(), float(args.grad_clip))
+                                else:
+                                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
                             opt.step()
                             tok += int(bs_try) * int(ga_try) * int(s)
                             peak = max(peak, mem_driver_gb())
@@ -845,6 +885,11 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
 
     total_opt_steps = int(args.steps) if not legacy_micro else int(math.ceil(int(args.steps) / max(1, grad_accum_default)))
 
+    # Self-optimizing batch caps (learned online via OOM events). Keys are seq_len.
+    auto_bs_cap_by_seq: Dict[int, int] = {}
+    warned_auto_caps: set[int] = set()
+    warned_mps_logits: set[int] = set()
+
     for opt_step in range(1, total_opt_steps + 1):
         last_step = opt_step
 
@@ -872,96 +917,318 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         if batch_schedule is not None:
             micro_bs, grad_accum = _batch_for_step(opt_step - 1, batch_schedule, default_bs=micro_bs, default_ga=grad_accum)
 
-        # Proactive MPSGraph guard: avoid opaque runtime errors when the logits tensor is too large.
+        # Desired global batch size for this step (best-effort constant even if we shrink micro_bs).
+        gbs_target = int(micro_bs) * int(grad_accum)
+
+        # Apply any learned caps from prior OOMs (caps at smaller seq_len also apply to larger seq_len).
+        try:
+            cap: Optional[int] = None
+            for s, bs_cap in auto_bs_cap_by_seq.items():
+                if int(s) <= int(seq_len):
+                    cap = int(bs_cap) if cap is None else min(int(cap), int(bs_cap))
+            if cap is not None and int(micro_bs) > int(cap):
+                micro_bs = int(cap)
+                grad_accum = int(math.ceil(float(gbs_target) / max(1.0, float(micro_bs))))
+                if int(seq_len) not in warned_auto_caps:
+                    print(f"[autobatch] applying learned cap @ seq={seq_len}: bs<={cap} (gbs_target={gbs_target})")
+                    warned_auto_caps.add(int(seq_len))
+        except Exception:
+            pass
+
+        # MPSGraph logits-size guard: automatically reduce micro-batch if (B*T*V) would exceed INT_MAX.
         if device.type == "mps":
             try:
                 max_elems = 2_147_483_647  # INT_MAX
-                logits_elems = int(micro_bs) * int(seq_len) * int(cfg.vocab_size)
-                if logits_elems > max_elems:
+                denom = int(seq_len) * int(cfg.vocab_size)
+                if denom <= 0:
+                    denom = 1
+                max_micro = int(max_elems // denom)
+                if max_micro < 1:
                     raise ValueError(
-                        f"MPSGraph limitation hit: B*T*vocab_size={logits_elems} > INT_MAX. "
-                        f"Reduce --batch-size or --train-seq-len (or increase --grad-accum instead). "
-                        f"(batch_size={micro_bs}, seq_len={seq_len}, vocab_size={cfg.vocab_size})"
+                        f"MPSGraph limitation hit: T*vocab_size={denom} > INT_MAX. "
+                        f"Reduce --train-seq-len/--block or use a smaller vocab."
                     )
+                if int(micro_bs) > int(max_micro):
+                    micro_bs = int(max_micro)
+                    grad_accum = int(math.ceil(float(gbs_target) / max(1.0, float(micro_bs))))
+                    if int(seq_len) not in warned_mps_logits:
+                        print(
+                            f"[autobatch] reducing batch_size on MPS to satisfy INT_MAX logits: "
+                            f"bs<={max_micro} (seq={seq_len} vocab={cfg.vocab_size}, gbs_target={gbs_target})"
+                        )
+                        warned_mps_logits.add(int(seq_len))
             except Exception:
                 pass
 
-        t_step0 = time.perf_counter()
-        loss_sum = 0.0
-        nonfinite = False
-        # Backward over grad_accum microbatches.
-        for _micro in range(grad_accum):
-            xb, yb = get_batch_any(train_view, batch_size=micro_bs, block_size=seq_len, device=device)
-            tok_count += int(xb.numel())
-            tok_acc += int(xb.numel())
-            t1 = time.perf_counter()
-            with autocast_ctx():
-                logits, _ = model(xb)
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
-                loss_to_back = loss / grad_accum
-            fwd_acc += time.perf_counter() - t1
-            if not torch.isfinite(loss.detach()).all():
-                nonfinite = True
-                break
-            t2 = time.perf_counter()
-            loss_to_back.backward()
-            bwd_acc += time.perf_counter() - t2
-            loss_sum += float(loss.detach().to("cpu").item())
+        # (batch_size, grad_accum) may be auto-adjusted on the fly on OOM.
+        micro_bs_try = int(micro_bs)
+        grad_accum_try = int(grad_accum)
 
-        t3 = time.perf_counter()
-        if nonfinite:
-            # Clear grads to avoid contaminating future steps.
+        dt_step = 0.0
+        fwd_step = 0.0
+        bwd_step = 0.0
+        opt_step_t = 0.0
+        tok_step = 0
+        loss_sum_t = torch.zeros([], device=device, dtype=torch.float32)
+
+        while True:
+            t_step0 = time.perf_counter()
+            loss_sum_t = torch.zeros([], device=device, dtype=torch.float32)
+            nonfinite = False
+            nonfinite_detail: Optional[str] = None
+            tok_step = 0
+            fwd_step = 0.0
+            bwd_step = 0.0
+            opt_step_t = 0.0
+
             opt.zero_grad(set_to_none=True)
-            if nan_policy == "reduce_lr":
-                lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
-                print(f"[warn] non-finite loss detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
-            elif nan_policy == "skip":
-                print(f"[warn] non-finite loss detected @ step {opt_step}; skipping optimizer step")
-            else:
-                raise RuntimeError(
-                    f"Non-finite loss detected at optimizer step {opt_step}. "
-                    f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, or disable --compile on MPS."
-                )
-        else:
-            grad_clip = float(getattr(args, "grad_clip", 0.0) or 0.0)
-            if grad_clip > 0:
-                # On MPS + bf16 params, PyTorch's clip_grad_norm_ can produce a non-finite norm
-                # due to bf16 overflow during the norm reduction even when grads are finite.
-                if device.type == "mps":
-                    gn = _clip_grad_norm_fp32(model.parameters(), grad_clip)
-                else:
-                    gn = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                if not torch.isfinite(gn.detach()).all():
-                    nonfinite = True
-            if nonfinite:
-                opt.zero_grad(set_to_none=True)
-                if nan_policy == "reduce_lr":
-                    lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
-                    print(f"[warn] non-finite grads detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
-                elif nan_policy == "skip":
-                    print(f"[warn] non-finite grads detected @ step {opt_step}; skipping optimizer step")
-                else:
-                    extra = _first_nonfinite_grad(model)
-                    raise RuntimeError(
-                        f"Non-finite gradients detected at optimizer step {opt_step}. "
-                        f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, or disable --compile on MPS."
-                        + (f" First bad grad: {extra}" if extra else "")
-                    )
-            else:
-                opt.step()
-                opt.zero_grad(set_to_none=True)
-                opt_acc += time.perf_counter() - t3
 
-        if bool(getattr(args, "sync_timing", False)):
-            device_synchronize(device)
-        dt = time.perf_counter() - t_step0
-        dt_acc += dt
+            try:
+                # Backward over grad_accum microbatches.
+                for _micro in range(grad_accum_try):
+                    xb, yb = get_batch_any(train_view, batch_size=micro_bs_try, block_size=seq_len, device=device)
+                    tok_step += int(xb.numel())
+
+                    # Fail fast on corrupt token IDs. On GPU backends this can otherwise produce undefined behavior
+                    # (instead of a clean "index out of range" error) and quickly lead to NaNs.
+                    try:
+                        x_oob = int(((xb < 0) | (xb >= int(cfg.vocab_size))).sum().detach().to("cpu").item())
+                        y_oob = int(((yb < 0) | (yb >= int(cfg.vocab_size))).sum().detach().to("cpu").item())
+                    except Exception:
+                        x_oob = 0
+                        y_oob = 0
+                    if x_oob or y_oob:
+                        try:
+                            x_min = int(xb.detach().min().to("cpu").item())
+                            x_max = int(xb.detach().max().to("cpu").item())
+                        except Exception:
+                            x_min = x_max = -1
+                        try:
+                            y_min = int(yb.detach().min().to("cpu").item())
+                            y_max = int(yb.detach().max().to("cpu").item())
+                        except Exception:
+                            y_min = y_max = -1
+
+                        dump_path = None
+                        try:
+                            os.makedirs(str(args.out_dir), exist_ok=True)
+                            dump_path = os.path.join(str(args.out_dir), f"oob_tokens_step{opt_step}_micro{_micro}.pt")
+                            torch.save(
+                                {
+                                    "opt_step": int(opt_step),
+                                    "micro": int(_micro),
+                                    "seq_len": int(seq_len),
+                                    "batch_size": int(micro_bs_try),
+                                    "grad_accum": int(grad_accum_try),
+                                    "vocab_size": int(cfg.vocab_size),
+                                    "x_oob": int(x_oob),
+                                    "y_oob": int(y_oob),
+                                    "xb": xb.detach().to("cpu"),
+                                    "yb": yb.detach().to("cpu"),
+                                },
+                                dump_path,
+                            )
+                        except Exception:
+                            dump_path = None
+
+                        raise RuntimeError(
+                            f"Out-of-range token ids detected at optimizer step {opt_step} micro={_micro+1}/{grad_accum_try}: "
+                            f"xb_oob={x_oob} yb_oob={y_oob} xb[min,max]=[{x_min},{x_max}] yb[min,max]=[{y_min},{y_max}]"
+                            + (f" dump={dump_path}" if dump_path else "")
+                            + ". This usually means --vocab-size is wrong or the batch got corrupted (e.g. torch.compile on MPS). "
+                              "Try --no-compile (and/or --no-amp) to isolate."
+                        )
+
+                    t1 = time.perf_counter()
+                    with autocast_ctx():
+                        logits, _ = model(xb)
+                        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                        loss_to_back = loss / grad_accum_try
+
+                    # Accumulate loss without synchronizing to CPU (important for GPU throughput).
+                    try:
+                        loss_sum_t = loss_sum_t + loss.detach().float()
+                    except Exception:
+                        pass
+                    fwd_step += time.perf_counter() - t1
+
+                    if not torch.isfinite(loss.detach()).all():
+                        nonfinite = True
+                        # Ensure logs for this step reflect non-finite state even if we break early.
+                        try:
+                            loss_sum_t = torch.full_like(loss_sum_t, float("nan"))
+                        except Exception:
+                            pass
+
+                        # Capture debug info for the failing microbatch (do NOT materially affect normal fast-path).
+                        try:
+                            loss_val = float(loss.detach().to("cpu").item())
+                        except Exception:
+                            loss_val = float("nan")
+                        try:
+                            x_min = int(xb.detach().min().to("cpu").item())
+                            x_max = int(xb.detach().max().to("cpu").item())
+                        except Exception:
+                            x_min = x_max = -1
+                        try:
+                            y_min = int(yb.detach().min().to("cpu").item())
+                            y_max = int(yb.detach().max().to("cpu").item())
+                        except Exception:
+                            y_min = y_max = -1
+                        try:
+                            x_oob = int(((xb < 0) | (xb >= int(cfg.vocab_size))).sum().detach().to("cpu").item())
+                            y_oob = int(((yb < 0) | (yb >= int(cfg.vocab_size))).sum().detach().to("cpu").item())
+                        except Exception:
+                            x_oob = -1
+                            y_oob = -1
+                        try:
+                            lg = logits.detach()
+                            lg_any_nan = bool(torch.isnan(lg).any().detach().to("cpu").item())
+                            lg_any_inf = bool(torch.isinf(lg).any().detach().to("cpu").item())
+                        except Exception:
+                            lg_any_nan = False
+                            lg_any_inf = False
+                        try:
+                            lg_last = logits.detach()[0, -1, :].float()
+                            lg_last_nan = bool(torch.isnan(lg_last).any().to("cpu").item())
+                            lg_last_inf = bool(torch.isinf(lg_last).any().to("cpu").item())
+                            lg_last_max_abs = float(
+                                torch.nan_to_num(lg_last, nan=0.0, posinf=0.0, neginf=0.0).abs().max().to("cpu").item()
+                            )
+                        except Exception:
+                            lg_last_nan = False
+                            lg_last_inf = False
+                            lg_last_max_abs = float("nan")
+
+                        dump_path = None
+                        try:
+                            os.makedirs(str(args.out_dir), exist_ok=True)
+                            dump_path = os.path.join(str(args.out_dir), f"nonfinite_loss_step{opt_step}_micro{_micro}.pt")
+                            torch.save(
+                                {
+                                    "opt_step": int(opt_step),
+                                    "micro": int(_micro),
+                                    "seq_len": int(seq_len),
+                                    "batch_size": int(micro_bs_try),
+                                    "grad_accum": int(grad_accum_try),
+                                    "vocab_size": int(cfg.vocab_size),
+                                    "xb": xb.detach().to("cpu"),
+                                    "yb": yb.detach().to("cpu"),
+                                },
+                                dump_path,
+                            )
+                        except Exception:
+                            dump_path = None
+
+                        nonfinite_detail = (
+                            f"micro={_micro+1}/{grad_accum_try} loss={loss_val} "
+                            f"xb[min,max]=[{x_min},{x_max}] yb[min,max]=[{y_min},{y_max}] xb_oob={x_oob} yb_oob={y_oob} "
+                            f"logits_nan={lg_any_nan} logits_inf={lg_any_inf} "
+                            f"logits_last_nan={lg_last_nan} logits_last_inf={lg_last_inf} logits_last_max|x|~{lg_last_max_abs:.3g}"
+                            + (f" dump={dump_path}" if dump_path else "")
+                        )
+                        break
+
+                    t2 = time.perf_counter()
+                    loss_to_back.backward()
+                    bwd_step += time.perf_counter() - t2
+
+                t3 = time.perf_counter()
+                if nonfinite:
+                    # Clear grads to avoid contaminating future steps.
+                    opt.zero_grad(set_to_none=True)
+                    if nan_policy == "reduce_lr":
+                        lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
+                        print(f"[warn] non-finite loss detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
+                        if nonfinite_detail:
+                            print(f"[warn] non-finite loss detail: {nonfinite_detail}")
+                    elif nan_policy == "skip":
+                        print(f"[warn] non-finite loss detected @ step {opt_step}; skipping optimizer step")
+                        if nonfinite_detail:
+                            print(f"[warn] non-finite loss detail: {nonfinite_detail}")
+                    else:
+                        raise RuntimeError(
+                            f"Non-finite loss detected at optimizer step {opt_step}. "
+                            f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, --no-compile, or --no-amp."
+                            + (f" Detail: {nonfinite_detail}" if nonfinite_detail else "")
+                        )
+                else:
+                    grad_clip = float(getattr(args, "grad_clip", 0.0) or 0.0)
+                    if grad_clip > 0:
+                        # On MPS + bf16 params, PyTorch's clip_grad_norm_ can produce a non-finite norm
+                        # due to bf16 overflow during the norm reduction even when grads are finite.
+                        if device.type == "mps":
+                            gn = _clip_grad_norm_fp32(model.parameters(), grad_clip)
+                        else:
+                            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        if not torch.isfinite(gn.detach()).all():
+                            nonfinite = True
+                    if nonfinite:
+                        # IMPORTANT: capture debug info BEFORE clearing grads.
+                        extra = _first_nonfinite_grad(model)
+                        opt.zero_grad(set_to_none=True)
+                        if nan_policy == "reduce_lr":
+                            lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
+                            print(f"[warn] non-finite grads detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
+                        elif nan_policy == "skip":
+                            print(f"[warn] non-finite grads detected @ step {opt_step}; skipping optimizer step")
+                        else:
+                            raise RuntimeError(
+                                f"Non-finite gradients detected at optimizer step {opt_step}. "
+                                f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, --grad-clip 0 (to isolate), "
+                                f"--no-compile, or --no-amp."
+                                + (f" First bad grad: {extra}" if extra else "")
+                            )
+                    else:
+                        opt.step()
+                        opt.zero_grad(set_to_none=True)
+                        opt_step_t = time.perf_counter() - t3
+
+                if bool(getattr(args, "sync_timing", False)):
+                    device_synchronize(device)
+                dt_step = time.perf_counter() - t_step0
+                break
+
+            except RuntimeError as e:
+                if _is_oom_error(e):
+                    if micro_bs_try <= 1:
+                        raise RuntimeError(
+                            f"Out of memory at optimizer step {opt_step} even with batch_size=1 (seq_len={seq_len}). "
+                            "Reduce model size, reduce --train-seq-len/--block, or enable --grad-checkpoint/--amp."
+                        ) from e
+                    new_bs = max(1, int(micro_bs_try // 2))
+                    prev = int(auto_bs_cap_by_seq.get(int(seq_len), 1 << 30))
+                    auto_bs_cap_by_seq[int(seq_len)] = min(prev, int(new_bs))
+                    _empty_device_cache(device)
+                    micro_bs_try = int(new_bs)
+                    grad_accum_try = int(math.ceil(float(gbs_target) / max(1.0, float(micro_bs_try))))
+                    print(
+                        f"[autobatch] OOM @ step {opt_step} seq={seq_len}; retrying with "
+                        f"batch_size={micro_bs_try} grad_accum={grad_accum_try} (gbs_target={gbs_target})"
+                    )
+                    continue
+                raise
+
+        # Update step-level accumulators using the *successful* attempt only.
+        tok_count += int(tok_step)
+        tok_acc += int(tok_step)
+        fwd_acc += float(fwd_step)
+        bwd_acc += float(bwd_step)
+        opt_acc += float(opt_step_t)
+        dt_acc += float(dt_step)
         steps_in_acc += 1
+
+        # Use the actual micro-batch/accum used for this step when logging.
+        micro_bs = int(micro_bs_try)
+        grad_accum = int(grad_accum_try)
 
         # Logging (optimizer steps)
         if int(args.log_every) > 0 and (opt_step % int(args.log_every) == 0 or opt_step == 1):
             tok_s = float(tok_acc / max(dt_acc, 1e-9))
-            loss_avg = float(loss_sum / max(1, grad_accum))
+            try:
+                loss_avg = float((loss_sum_t / max(1, grad_accum)).detach().to("cpu").item())
+            except Exception:
+                loss_avg = float("nan")
             ppl = float(math.exp(loss_avg)) if loss_avg < 20 else float("inf")
             ev = {
                 "type": "train",
@@ -1010,5 +1277,3 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     if logger is not None:
         logger.finalize(best_val=best_val if best_val < float("inf") else float("nan"), last_step=last_step)
         logger.close()
-
-

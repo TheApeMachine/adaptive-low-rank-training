@@ -334,12 +334,48 @@ class KVDecodeSelfOptimizer:
         geo_scale: float,
     ) -> torch.Tensor:
         plan.apply_to_cache(cache)
+
         if plan.fused == "none":
-            return attn._streaming_decode_attn_decoupled(cache, q_sem, q_geo, sem_scale=sem_scale, geo_scale=geo_scale)
+            return attn._streaming_decode_attn_decoupled(
+                q_sem=q_sem,
+                q_geo=q_geo,
+                k_sem_cache=cache.k_sem,
+                k_geo_cache=cache.k_geo,
+                v_cache=cache.v,
+                sem_head_dim=attn.sem_head_dim,
+                geo_head_dim=attn.geo_head_dim,
+                v_head_dim=attn.v_head_dim,
+                decode_block=plan.decode_block,
+                sem_scale=sem_scale,
+                geo_scale=geo_scale,
+                k_sem_null=None,
+                k_geo_null=None,
+                v_null=None,
+            )
         if plan.fused == "triton1pass":
-            return attn._fused_decode_attn_decoupled_q4q8q4(cache, q_sem, q_geo, sem_scale=sem_scale, geo_scale=geo_scale)
+            return attn._fused_decode_attn_decoupled_q4q8q4(
+                q_sem=q_sem,
+                q_geo=q_geo,
+                cache=cache,
+                sem_head_dim=attn.sem_head_dim,
+                geo_head_dim=attn.geo_head_dim,
+                v_head_dim=attn.v_head_dim,
+                decode_block=plan.decode_block,
+                sem_scale=sem_scale,
+                geo_scale=geo_scale,
+            )
         if plan.fused == "triton2pass":
-            return attn._fused_decode_attn_decoupled_q4q8q4_2pass(cache, q_sem, q_geo, sem_scale=sem_scale, geo_scale=geo_scale)
+            return attn._fused_decode_attn_decoupled_q4q8q4_2pass(
+                q_sem=q_sem,
+                q_geo=q_geo,
+                cache=cache,
+                sem_head_dim=attn.sem_head_dim,
+                geo_head_dim=attn.geo_head_dim,
+                v_head_dim=attn.v_head_dim,
+                decode_block=plan.decode_block,
+                sem_scale=sem_scale,
+                geo_scale=geo_scale,
+            )
         raise ValueError(plan.fused)
 
     def _bench_plan(
@@ -369,48 +405,101 @@ class KVDecodeSelfOptimizer:
             ms += self._time_ms(fn)
         return float(ms) / float(max(1, int(self.cfg.iters)))
 
-    def choose_plan(
-        self,
-        *,
-        attn: Any,
-        cache: Any,
-        q_sem: torch.Tensor,
-        q_geo: torch.Tensor,
-        sem_scale: float,
-        geo_scale: float,
-    ) -> Optional[KVDecodePlan]:
-        """Return the chosen plan for this prefix bucket (may be cached)."""
+    def maybe_get_plan(self, *, attn: Any, cache: Any, L_prefix: int) -> Optional[KVDecodePlan]:
         if self.cfg.mode == "none":
             return None
 
-        L_prefix = int(getattr(cache, "cur_len", 0))
-        k = self._key(attn=attn, cache=cache, L_prefix=L_prefix)
         self._step_counter += 1
+        k = self._key(attn=attn, cache=cache, L_prefix=int(L_prefix))
 
-        if k in self._plans:
+        if k in self._plans and self.cfg.mode == "startup":
             return self._plans[k]
 
-        # Baseline output for verification (streaming path)
+        if k in self._plans and self.cfg.mode == "online":
+            last = self._last_probe_step.get(k, -10**9)
+            if (self._step_counter - last) < int(self.cfg.interval):
+                return self._plans[k]
+
+        plans = self._candidate_plans(cache=cache)
+        if not plans:
+            return None
+
+        # Build a stable synthetic query (timing depends on shapes, not values).
+        B = 1
+        try:
+            ks = getattr(cache, "k_sem", None)
+            if ks is not None:
+                if getattr(ks, "buf", None) is not None:
+                    B = int(ks.buf.shape[0])
+                elif getattr(ks, "q", None) is not None:
+                    B = int(ks.q.shape[0])
+        except Exception:
+            B = 1
+
+        H = int(getattr(attn, "H", 1))
+        q_sem = torch.randn((B, H, 1, int(attn.sem_head_dim)), device=self.device, dtype=torch.float16)
+        q_geo = torch.randn((B, H, 1, int(attn.geo_head_dim)), device=self.device, dtype=torch.float16)
+        sem_scale = 1.0 / math.sqrt(float(attn.sem_head_dim))
+        geo_scale = 1.0 / math.sqrt(float(attn.geo_head_dim))
+
+        baseline_plan = self._plans.get(k, KVDecodePlan(fused="none", decode_block=self.base_decode_block))
         baseline_out = None
         if self.cfg.verify:
             try:
-                old_fused = getattr(cache, "fused", "none")
-                cache.fused = "none"
-                baseline_out = attn._streaming_decode_attn_decoupled(cache, q_sem, q_geo, sem_scale=sem_scale, geo_scale=geo_scale).detach()
-                cache.fused = old_fused
+                baseline_out = self._run_plan(
+                    attn=attn,
+                    cache=cache,
+                    q_sem=q_sem,
+                    q_geo=q_geo,
+                    plan=baseline_plan,
+                    sem_scale=sem_scale,
+                    geo_scale=geo_scale,
+                ).detach()
             except Exception:
                 baseline_out = None
 
-        best_plan = None
-        best_ms = float("inf")
-        for plan in self._candidate_plans(cache=cache):
+        best_plan: Optional[KVDecodePlan] = None
+        best_ms: float = float("inf")
+
+        for p in plans:
             try:
-                ms = self._bench_plan(attn=attn, cache=cache, q_sem=q_sem, q_geo=q_geo, plan=plan, sem_scale=sem_scale, geo_scale=geo_scale, baseline_out=baseline_out)
-            except Exception:
+                ms = self._bench_plan(
+                    attn=attn,
+                    cache=cache,
+                    q_sem=q_sem,
+                    q_geo=q_geo,
+                    plan=p,
+                    sem_scale=sem_scale,
+                    geo_scale=geo_scale,
+                    baseline_out=baseline_out,
+                )
+            except Exception as e:
+                if self.cfg.verbose:
+                    print(f"[selfopt] plan failed {p}: {e}")
                 ms = float("inf")
             if ms < best_ms:
                 best_ms = ms
-                best_plan = plan
+                best_plan = p
+
+        if best_plan is not None and k in self._plans and self.cfg.mode == "online":
+            old = self._plans[k]
+            try:
+                old_ms = self._bench_plan(
+                    attn=attn,
+                    cache=cache,
+                    q_sem=q_sem,
+                    q_geo=q_geo,
+                    plan=old,
+                    sem_scale=sem_scale,
+                    geo_scale=geo_scale,
+                    baseline_out=baseline_out,
+                )
+            except Exception:
+                old_ms = float("inf")
+            if not (best_ms < old_ms * (1.0 - float(self.cfg.hysteresis))):
+                best_plan = old
+                best_ms = old_ms
+            self._last_probe_step[k] = self._step_counter
 
         if best_plan is not None:
             self._plans[k] = best_plan
@@ -429,8 +518,22 @@ class KVDecodeSelfOptimizer:
                         "best_ms": float(best_ms),
                     }
                 )
-
         return best_plan
+
+    def choose_plan(
+        self,
+        *,
+        attn: Any,
+        cache: Any,
+        q_sem: torch.Tensor,
+        q_geo: torch.Tensor,
+        sem_scale: float,
+        geo_scale: float,
+    ) -> Optional[KVDecodePlan]:
+        """Backward-compatible alias for `maybe_get_plan` (query values do not affect timing)."""
+        _ = (q_sem, q_geo, sem_scale, geo_scale)
+        L_prefix = int(getattr(cache, "pos", 0))
+        return self.maybe_get_plan(attn=attn, cache=cache, L_prefix=L_prefix)
 
 
 @dataclass(frozen=True)
@@ -981,5 +1084,3 @@ def warn_policy_quality_reject(*, chosen: str, fallback: str, reasons: List[str]
         return
     msg = "; ".join(reasons)
     print(f"[warn] selfopt cache-policy rejected: {chosen} -> fallback {fallback} ({msg})")
-
-

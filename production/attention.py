@@ -490,11 +490,25 @@ class DecoupledBottleneckAttention(nn.Module):
         scale = torch.exp(s).to(dtype=q.dtype).view(1, -1, 1, 1)
         return q * scale
 
-    def _sdp(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_mask: Optional[torch.Tensor]) -> torch.Tensor:
+    def _sdp(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
+        *,
+        scale: Optional[float] = None,
+    ) -> torch.Tensor:
         dropout_p = self.cfg.dropout if self.training else 0.0
-        if attn_mask is None:
-            return F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=True)
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=False)
+        is_causal = attn_mask is None
+
+        # SDPA defaults to an implicit scale of 1/sqrt(dk). To request an explicit `scale`, we emulate it
+        # by pre-scaling q so we can stay on the most stable/portable SDPA call signature (no `scale=` kwarg).
+        if scale is not None:
+            dk = int(q.size(-1))
+            q = q * (float(scale) * math.sqrt(dk))
+
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal)
 
     def _streaming_decode_attn(
         self,
@@ -978,19 +992,27 @@ class DecoupledBottleneckAttention(nn.Module):
         ninfty = neg_inf(x.dtype)
 
         if cfg.attn_mode in ("standard", "bottleneck"):
-            q = self.q_proj(x)
-            k = self.k_proj(x)
-            v = self.v_proj(x)
+            # If tie_qk is enabled, q_proj == k_proj and the projections are identical for self-attention.
+            # Compute once and reuse (saves a full matmul + reshape + rotary per layer).
+            if self.k_proj is self.q_proj:
+                qk = self.q_proj(x)
+                qh_base = self._shape(qk, self.qk_head_dim)
+                if self.rotary is not None:
+                    qh_base = self.rotary.rotate(qh_base, pos_offset)
+                kh = qh_base
+            else:
+                q = self.q_proj(x)
+                k = self.k_proj(x)
+                qh_base = self._shape(q, self.qk_head_dim)
+                kh = self._shape(k, self.qk_head_dim)
+                if self.rotary is not None:
+                    qh_base = self.rotary.rotate(qh_base, pos_offset)
+                    kh = self.rotary.rotate(kh, pos_offset)
 
-            qh = self._shape(q, self.qk_head_dim)
-            kh = self._shape(k, self.qk_head_dim)
+            v = self.v_proj(x)
             vh = self._shape(v, self.v_head_dim)
 
-            if self.rotary is not None:
-                qh = self.rotary.rotate(qh, pos_offset)
-                kh = self.rotary.rotate(kh, pos_offset)
-
-            qh = self._apply_logit_scale_to_q(qh)
+            qh = self._apply_logit_scale_to_q(qh_base)
 
             if cache is None:
                 if not cfg.null_attn:
@@ -1288,62 +1310,149 @@ class DecoupledBottleneckAttention(nn.Module):
         # Conceptually, we split attention into two additive paths:
         #   score = (Q_sem · K_sem^T) + (Q_geo · K_geo^T)
         # with RoPE applied only to the geometric path.
-        q_sem = self.q_sem(x)
-        k_sem = self.k_sem(x)
-        q_geo = self.q_geo(x)
-        k_geo = self.k_geo(x)
-        v = self.v_proj(x)
+        if self.k_sem is self.q_sem:
+            sem = self.q_sem(x)
+            sem_h = self._shape(sem, self.sem_head_dim)
+            qsh_base = sem_h
+            ksh = sem_h
+        else:
+            q_sem = self.q_sem(x)
+            k_sem = self.k_sem(x)
+            qsh_base = self._shape(q_sem, self.sem_head_dim)
+            ksh = self._shape(k_sem, self.sem_head_dim)
 
-        qsh = self._shape(q_sem, self.sem_head_dim)
-        ksh = self._shape(k_sem, self.sem_head_dim)
-        qgh = self._shape(q_geo, self.geo_head_dim)
-        kgh = self._shape(k_geo, self.geo_head_dim)
+        if self.k_geo is self.q_geo:
+            geo = self.q_geo(x)
+            geo_h = self._shape(geo, self.geo_head_dim)
+            if self.rotary is not None:
+                geo_h = self.rotary.rotate(geo_h, pos_offset)
+            qgh_base = geo_h
+            kgh = geo_h
+        else:
+            q_geo = self.q_geo(x)
+            k_geo = self.k_geo(x)
+            qgh_base = self._shape(q_geo, self.geo_head_dim)
+            kgh = self._shape(k_geo, self.geo_head_dim)
+            if self.rotary is not None:
+                # IMPORTANT: RoPE applies ONLY to geometric/position path.
+                qgh_base = self.rotary.rotate(qgh_base, pos_offset)
+                kgh = self.rotary.rotate(kgh, pos_offset)
+
+        v = self.v_proj(x)
         vh = self._shape(v, self.v_head_dim)
 
-        if self.rotary is not None:
-            # IMPORTANT: RoPE applies ONLY to geometric/position path.
-            qgh = self.rotary.rotate(qgh, pos_offset)
-            kgh = self.rotary.rotate(kgh, pos_offset)
-
         # Per-head learned temperature (applied to both paths by scaling queries).
-        if self.logit_scale is not None:
-            scale_q = torch.exp(self.logit_scale.view(1, -1, 1, 1))
-            qsh = qsh * scale_q
-            qgh = qgh * scale_q
-
-        # Optional per-head sem/geo mixing gate (neutral init reproduces old behavior).
-        sem_gate = None
-        geo_gate = None
-        if self.decoupled_gate_logit is not None:
-            g = torch.sigmoid(self.decoupled_gate_logit).view(1, -1, 1, 1)
-            sem_gate = (g * 2.0)  # mean 1.0 at init
-            geo_gate = ((1.0 - g) * 2.0)
+        qsh = self._apply_logit_scale_to_q(qsh_base)
+        qgh = self._apply_logit_scale_to_q(qgh_base)
 
         sem_scale = 1.0 / math.sqrt(self.sem_head_dim)
         geo_scale = 1.0 / math.sqrt(self.geo_head_dim)
 
-        if sem_gate is not None and geo_gate is not None:
-            sem_scale_t = sem_gate * sem_scale
-            geo_scale_t = geo_gate * geo_scale
-        else:
-            sem_scale_t = sem_scale
-            geo_scale_t = geo_scale
+        # Optional per-head sem/geo mixing gate.
+        # Implemented as a query scaling so it works with both streaming decode and fused kernels.
+        if self.decoupled_gate_logit is not None:
+            g = torch.sigmoid(self.decoupled_gate_logit).view(1, -1, 1, 1).to(dtype=qsh.dtype, device=qsh.device)
+            qsh = qsh * (2.0 * g)  # mean 1.0 at init (g=0.5)
+            qgh = qgh * (2.0 * (1.0 - g))
 
         if cache is None:
             # Training / full-attn:
             # Prefer SDPA for stability (it is much less prone to bf16 softmax overflow than the manual path).
             if not cfg.null_attn:
+                # Long-seq auto-optimization: use a semantic "compressed memory" plus full-res local tail.
+                # This reduces the dominant O(T^2) term to ~O(T^2 / mem_block + T*local_window) while keeping
+                # the geometric path high-resolution in the recent window.
+                #
+                # Trigger only at long sequence lengths to minimize behavioral drift at typical training ctx.
+                if self.training and attn_mask is None:
+                    dev = x.device.type
+                    # Auto-trigger at long seq: start once we approach the configured block_size (but never below 3k).
+                    long_seq_threshold = max(3072, int(0.75 * cfg.block_size))
+                    if dev == "mps":
+                        long_seq_threshold = min(long_seq_threshold, 3072)
+                    if T >= long_seq_threshold:
+                        try:
+                            if dev == "cuda":
+                                mem_block = 128 if T >= 8192 else 64
+                                local_window = 1024 if T >= 8192 else 512
+                                q_chunk = 256
+                            else:
+                                mem_block = 64
+                                local_window = 512
+                                q_chunk = 128
+
+                            local_window = int(min(max(0, local_window), T))
+                            mem_block = int(max(1, mem_block))
+                            q_chunk = int(max(1, q_chunk))
+
+                            B0, H0, T0, sem_hd = qsh.shape
+                            v_hd = int(vh.size(-1))
+                            n_blocks = int(T0 // mem_block)
+
+                            q_cat_full = torch.cat([qsh * sem_scale, qgh * geo_scale], dim=-1)
+
+                            if n_blocks > 0:
+                                k_sem_blocks = (
+                                    ksh[:, :, : n_blocks * mem_block, :]
+                                    .reshape(B0, H0, n_blocks, mem_block, sem_hd)
+                                    .mean(dim=3)
+                                )
+                                v_blocks = (
+                                    vh[:, :, : n_blocks * mem_block, :]
+                                    .reshape(B0, H0, n_blocks, mem_block, v_hd)
+                                    .mean(dim=3)
+                                )
+                                k_mem_cat_all = torch.cat(
+                                    [
+                                        k_sem_blocks,
+                                        k_sem_blocks.new_zeros((B0, H0, n_blocks, self.geo_head_dim)),
+                                    ],
+                                    dim=-1,
+                                )
+                            else:
+                                v_blocks = None
+                                k_mem_cat_all = None
+
+                            out = vh.new_empty((B0, H0, T0, v_hd))
+                            for t0 in range(0, T0, q_chunk):
+                                t1 = min(T0, t0 + q_chunk)
+                                # Define a full-res local band ending at the current chunk end.
+                                # Align its start to mem_block so memory summaries never overlap the local band.
+                                local_start_raw = max(0, int(t0) - int(local_window))
+                                mem_len = int(local_start_raw // mem_block)
+                                local_start = int(mem_len * mem_block)
+
+                                q_cat = q_cat_full[:, :, t0:t1, :]
+                                k_local_cat = torch.cat([ksh[:, :, local_start:t1, :], kgh[:, :, local_start:t1, :]], dim=-1)
+                                v_local = vh[:, :, local_start:t1, :]
+
+                                if mem_len > 0 and k_mem_cat_all is not None and v_blocks is not None:
+                                    k_cat = torch.cat([k_mem_cat_all[:, :, :mem_len, :], k_local_cat], dim=2)
+                                    v_cat = torch.cat([v_blocks[:, :, :mem_len, :], v_local], dim=2)
+                                else:
+                                    k_cat = k_local_cat
+                                    v_cat = v_local
+
+                                out[:, :, t0:t1, :] = self._sdp(q_cat, k_cat, v_cat, attn_mask=None, scale=1.0)
+
+                            y = self.out_proj(self._merge(out))
+                            return y, None
+                        except Exception:
+                            # Safety fallback: if anything goes wrong, use the exact SDPA path.
+                            pass
+
                 # Combine sem+geo into a single SDPA call by concatenating along head_dim.
                 # q/k last-dim must match; v may have a different last-dim (v_head_dim).
-                q_cat = torch.cat([qsh * sem_scale_t, qgh * geo_scale_t], dim=-1)
+                q_cat = torch.cat([qsh * sem_scale, qgh * geo_scale], dim=-1)
                 k_cat = torch.cat([ksh, kgh], dim=-1)
-                out = self._sdp(q_cat, k_cat, vh, attn_mask=None if attn_mask is None else attn_mask)
+                # q_cat is already pre-scaled above; force SDPA to use scale=1.0 to avoid double scaling.
+                out = self._sdp(q_cat, k_cat, vh, attn_mask=None if attn_mask is None else attn_mask, scale=1.0)
                 y = self.out_proj(self._merge(out))
                 return y, None
 
             # Null-attn path (manual).
-            sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale_t
-            geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale_t
+            sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale
+            geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale
             scores = sem + geo
 
             if attn_mask is not None:
@@ -1355,7 +1464,7 @@ class DecoupledBottleneckAttention(nn.Module):
             ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
             kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
             vn = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim)
-            s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale_t + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale_t)
+            s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale)
             scores = torch.cat([s_null, scores], dim=-1)
 
             attn = F.softmax(scores, dim=-1)
@@ -1372,15 +1481,15 @@ class DecoupledBottleneckAttention(nn.Module):
         if old_len == 0 and T > 1:
             # prefill without cache readback
             if cfg.null_attn:
-                sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale_t
-                geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale_t
+                sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale
+                geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale
                 scores = sem + geo
                 if attn_mask is not None:
                     scores = scores.masked_fill(~attn_mask, ninfty)
                 ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
                 kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
                 vn = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim)
-                s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale_t + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale_t)
+                s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale)
                 scores = torch.cat([s_null, scores], dim=-1)
                 if attn_mask is not None:
                     extra = torch.ones((1, 1, T, 1), device=attn_mask.device, dtype=attn_mask.dtype)
@@ -1391,15 +1500,9 @@ class DecoupledBottleneckAttention(nn.Module):
                 vals = torch.cat([vn, vh], dim=-2)
                 out = torch.matmul(attn, vals)
             else:
-                # no SDPA variant for decoupled in this file; use explicit scores
-                sem = torch.matmul(qsh, ksh.transpose(-2, -1)) * sem_scale_t
-                geo = torch.matmul(qgh, kgh.transpose(-2, -1)) * geo_scale_t
-                scores = sem + geo
-                if attn_mask is not None:
-                    scores = scores.masked_fill(~attn_mask, ninfty)
-                attn = F.softmax(scores, dim=-1)
-                attn = self.drop(attn)
-                out = torch.matmul(attn, vh)
+                q_cat = torch.cat([qsh * sem_scale, qgh * geo_scale], dim=-1)
+                k_cat = torch.cat([ksh, kgh], dim=-1)
+                out = self._sdp(q_cat, k_cat, vh, attn_mask=None if attn_mask is None else attn_mask, scale=1.0)
 
             y = self.out_proj(self._merge(out))
             cache.append(self._merge(ksh), self._merge(kgh), self._merge(vh))
@@ -1413,50 +1516,18 @@ class DecoupledBottleneckAttention(nn.Module):
         if T == 1:
             cache.append(self._merge(ksh), self._merge(kgh), self._merge(vh))
             decode_block = getattr(cache, "decode_block", 1024)
-            fused = getattr(cache, "fused", "none")
-            if fused == "auto":
-                fused = (
-                    "triton2pass"
-                    if (
-                        _triton_decoupled_q4q8q4_available()
-                        and cache.k_sem.kind == "q4_0"
-                        and cache.k_geo.kind == "q8_0"
-                        and cache.v.kind == "q4_0"
-                        and cache.k_sem.spec.qblock == 32
-                        and cache.k_geo.spec.qblock == 32
-                        and cache.v.spec.qblock == 32
-                        and (not cfg.null_attn)
-                        and x.device.type == "cuda"
-                    )
-                    else "none"
-                )
-
-            if fused in ("triton1pass", "triton2pass"):
-                if fused == "triton1pass":
-                    out = self._fused_decode_attn_decoupled_q4q8q4(
-                        q_sem=qsh,
-                        q_geo=qgh,
-                        cache=cache,
-                        sem_head_dim=self.sem_head_dim,
-                        geo_head_dim=self.geo_head_dim,
-                        v_head_dim=self.v_head_dim,
-                        decode_block=decode_block,
-                        sem_scale=float(sem_scale),
-                        geo_scale=float(geo_scale),
-                    )
-                else:
-                    out = self._fused_decode_attn_decoupled_q4q8q4_2pass(
-                        q_sem=qsh,
-                        q_geo=qgh,
-                        cache=cache,
-                        sem_head_dim=self.sem_head_dim,
-                        geo_head_dim=self.geo_head_dim,
-                        v_head_dim=self.v_head_dim,
-                        decode_block=decode_block,
-                        sem_scale=float(sem_scale),
-                        geo_scale=float(geo_scale),
-                    )
+            # fp16 cache -> materialize and use SDPA (usually faster than Python streaming)
+            if (not cfg.null_attn) and (not cache.k_sem.is_quantized) and (not cache.k_geo.is_quantized) and (not cache.v.is_quantized):
+                k_sem_all = self._shape(cache.k_sem.get(dtype=qsh.dtype), self.sem_head_dim)
+                k_geo_all = self._shape(cache.k_geo.get(dtype=qsh.dtype), self.geo_head_dim)
+                v_all = self._shape(cache.v.get(dtype=qsh.dtype), self.v_head_dim)
+                q_cat = torch.cat([qsh * sem_scale, qgh * geo_scale], dim=-1)
+                k_cat = torch.cat([k_sem_all, k_geo_all], dim=-1)
+                # Disable SDPA's implicit 1/sqrt(dk) scaling (we already applied per-path scales above).
+                q_cat = q_cat * math.sqrt(int(q_cat.size(-1)))
+                out = F.scaled_dot_product_attention(q_cat, k_cat, v_all, attn_mask=None, dropout_p=0.0, is_causal=False)
             else:
+                # Quantized/null-attn -> streaming or fused decode.
                 if cfg.null_attn:
                     ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
                     kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
@@ -1464,22 +1535,86 @@ class DecoupledBottleneckAttention(nn.Module):
                 else:
                     ksn = kgn = vn = None
 
-                out = self._streaming_decode_attn_decoupled(
-                    q_sem=qsh,
-                    q_geo=qgh,
-                    k_sem_cache=cache.k_sem,
-                    k_geo_cache=cache.k_geo,
-                    v_cache=cache.v,
-                    sem_head_dim=self.sem_head_dim,
-                    geo_head_dim=self.geo_head_dim,
-                    v_head_dim=self.v_head_dim,
-                    decode_block=decode_block,
-                    sem_scale=float(sem_scale),
-                    geo_scale=float(geo_scale),
-                    k_sem_null=ksn,
-                    k_geo_null=kgn,
-                    v_null=vn,
-                )
+                def fused_ok() -> bool:
+                    return bool(
+                        (not cfg.null_attn)
+                        and _triton_decoupled_q4q8q4_available()
+                        and cache.k_sem.kind == "q4_0"
+                        and cache.k_geo.kind == "q8_0"
+                        and cache.v.kind == "q4_0"
+                        and cache.k_sem.spec.qblock == 32
+                        and cache.k_geo.spec.qblock == 32
+                        and cache.v.spec.qblock == 32
+                        and x.device.type == "cuda"
+                    )
+
+                fused = getattr(cache, "fused", "none")
+                if fused == "auto":
+                    if fused_ok():
+                        fused = "triton2pass" if int(cache.pos) >= 4 * int(decode_block) else "triton1pass"
+                    else:
+                        fused = "none"
+
+                if fused in ("triton1pass", "triton2pass") and fused_ok():
+                    try:
+                        if fused == "triton1pass":
+                            out = self._fused_decode_attn_decoupled_q4q8q4(
+                                q_sem=qsh,
+                                q_geo=qgh,
+                                cache=cache,
+                                sem_head_dim=self.sem_head_dim,
+                                geo_head_dim=self.geo_head_dim,
+                                v_head_dim=self.v_head_dim,
+                                decode_block=decode_block,
+                                sem_scale=float(sem_scale),
+                                geo_scale=float(geo_scale),
+                            )
+                        else:
+                            out = self._fused_decode_attn_decoupled_q4q8q4_2pass(
+                                q_sem=qsh,
+                                q_geo=qgh,
+                                cache=cache,
+                                sem_head_dim=self.sem_head_dim,
+                                geo_head_dim=self.geo_head_dim,
+                                v_head_dim=self.v_head_dim,
+                                decode_block=decode_block,
+                                sem_scale=float(sem_scale),
+                                geo_scale=float(geo_scale),
+                            )
+                    except Exception:
+                        out = self._streaming_decode_attn_decoupled(
+                            q_sem=qsh,
+                            q_geo=qgh,
+                            k_sem_cache=cache.k_sem,
+                            k_geo_cache=cache.k_geo,
+                            v_cache=cache.v,
+                            sem_head_dim=self.sem_head_dim,
+                            geo_head_dim=self.geo_head_dim,
+                            v_head_dim=self.v_head_dim,
+                            decode_block=decode_block,
+                            sem_scale=float(sem_scale),
+                            geo_scale=float(geo_scale),
+                            k_sem_null=ksn,
+                            k_geo_null=kgn,
+                            v_null=vn,
+                        )
+                else:
+                    out = self._streaming_decode_attn_decoupled(
+                        q_sem=qsh,
+                        q_geo=qgh,
+                        k_sem_cache=cache.k_sem,
+                        k_geo_cache=cache.k_geo,
+                        v_cache=cache.v,
+                        sem_head_dim=self.sem_head_dim,
+                        geo_head_dim=self.geo_head_dim,
+                        v_head_dim=self.v_head_dim,
+                        decode_block=decode_block,
+                        sem_scale=float(sem_scale),
+                        geo_scale=float(geo_scale),
+                        k_sem_null=ksn,
+                        k_geo_null=kgn,
+                        v_null=vn,
+                    )
 
             y = self.out_proj(self._merge(out))
             return y, cache
@@ -1535,8 +1670,8 @@ class DecoupledBottleneckAttention(nn.Module):
         kgh_all = self._shape(k_geo_all, self.geo_head_dim)
         vh_all = self._shape(v_all, self.v_head_dim)
 
-        sem = torch.matmul(qsh, ksh_all.transpose(-2, -1)) * sem_scale_t
-        geo = torch.matmul(qgh, kgh_all.transpose(-2, -1)) * geo_scale_t
+        sem = torch.matmul(qsh, ksh_all.transpose(-2, -1)) * sem_scale
+        geo = torch.matmul(qgh, kgh_all.transpose(-2, -1)) * geo_scale
         scores = sem + geo
 
         if attn_mask is not None:
@@ -1551,7 +1686,7 @@ class DecoupledBottleneckAttention(nn.Module):
             ksn = self._shape(self.k_sem_null.expand(B, 1, -1), self.sem_head_dim)
             kgn = self._shape(self.k_geo_null.expand(B, 1, -1), self.geo_head_dim)
             vn = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim)
-            s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale_t + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale_t)
+            s_null = (torch.matmul(qsh, ksn.transpose(-2, -1)) * sem_scale + torch.matmul(qgh, kgn.transpose(-2, -1)) * geo_scale)
             scores = torch.cat([s_null, scores], dim=-1)
             attn = F.softmax(scores, dim=-1)
             attn = self.drop(attn)
@@ -1564,5 +1699,3 @@ class DecoupledBottleneckAttention(nn.Module):
 
         y = self.out_proj(self._merge(out))
         return y, cache
-
-

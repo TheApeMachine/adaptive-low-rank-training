@@ -1,0 +1,26 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/f8m14866
+step 1/20000 loss=11.2434 ppl=76374.30 lr=5e-07 tok/s=1153 seq=512 gbs=64 ms/step=28422
+step 10/20000 loss=11.1433 ppl=69098.79 lr=5e-06 tok/s=1235 seq=512 gbs=64 ms/step=26542
+step 20/20000 loss=10.6948 ppl=44124.47 lr=1e-05 tok/s=1151 seq=512 gbs=64 ms/step=28472
+step 30/20000 loss=10.2841 ppl=29263.51 lr=1.5e-05 tok/s=1121 seq=512 gbs=64 ms/step=29236
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 516, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 512, in main
+    return int(run(args))
+               ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 496, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1133, in run_single
+    loss_to_back.backward()
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/_tensor.py", line 625, in backward
+    torch.autograd.backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/lib/python3.12/site-packages/torch/autograd/graph.py", line 841, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

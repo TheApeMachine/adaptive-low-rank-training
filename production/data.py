@@ -128,9 +128,13 @@ def get_batch_any(
     if isinstance(view.data, torch.Tensor):
         base = (int(view.start) + ix).unsqueeze(1)
         idx = base + offs_t.unsqueeze(0)
-        x = view.data[idx]
+        x = view.data[idx].to(torch.int32)
         y = view.data[idx + 1]
-        return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        if device.type == "cuda":
+            x = x.pin_memory()
+            y = y.pin_memory()
+            return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        return x.to(device), y.to(device)
 
     if _np is None:
         raise ImportError("numpy required for numpy/memmap batch sampling.")
@@ -143,10 +147,14 @@ def get_batch_any(
     ix_np = ix.numpy().astype(_np.int64, copy=False)  # type: ignore[union-attr]
     idx_np = (int(view.start) + ix_np[:, None] + offs_np[None, :]).astype(_np.int64, copy=False)
 
-    x_np = _np.asarray(view.data[idx_np], dtype=_np.int64)  # type: ignore[union-attr]
+    # Keep inputs compact: embedding accepts int32 indices, targets remain int64 for cross_entropy.
+    x_np = _np.asarray(view.data[idx_np], dtype=_np.int32)  # type: ignore[union-attr]
     y_np = _np.asarray(view.data[idx_np + 1], dtype=_np.int64)  # type: ignore[union-attr]
     x = torch.from_numpy(x_np)
     y = torch.from_numpy(y_np)
-    return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-
+    if device.type == "cuda":
+        x = x.pin_memory()
+        y = y.pin_memory()
+        return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    return x.to(device), y.to(device)
 

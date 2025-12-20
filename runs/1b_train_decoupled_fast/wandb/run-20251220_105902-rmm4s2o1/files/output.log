@@ -1,0 +1,2 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/1b_decoupled/runs/rmm4s2o1
+step 1/20000 loss=11.2434 ppl=76374.30 lr=5e-07 tok/s=1286 seq=512 gbs=64 ms/step=25488

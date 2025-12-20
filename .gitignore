@@ -32,3 +32,4 @@ sources.md
 paper.fls
 paper.log
 paper.out
+*.wandb

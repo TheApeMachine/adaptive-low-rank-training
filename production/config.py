@@ -173,13 +173,16 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
     if "param_dtype" in preset:
         set_if_missing("--param-dtype", "param_dtype", str(preset["param_dtype"]))
     if "amp" in preset and bool(preset["amp"]):
-        set_if_missing("--amp", "amp", True)
+        if (not _argv_has_flag("--amp")) and (not _argv_has_flag("--no-amp")):
+            args.amp = True
     if "amp_dtype" in preset:
         set_if_missing("--amp-dtype", "amp_dtype", str(preset["amp_dtype"]))
     if "grad_checkpoint" in preset and bool(preset["grad_checkpoint"]):
-        set_if_missing("--grad-checkpoint", "grad_checkpoint", True)
+        if (not _argv_has_flag("--grad-checkpoint")) and (not _argv_has_flag("--no-grad-checkpoint")):
+            args.grad_checkpoint = True
     if "compile" in preset and bool(preset["compile"]):
-        set_if_missing("--compile", "compile", True)
+        if (not _argv_has_flag("--compile")) and (not _argv_has_flag("--no-compile")):
+            args.compile = True
     if "compile_mode" in preset:
         set_if_missing("--compile-mode", "compile_mode", str(preset["compile_mode"]))
     if "optimizer" in preset:
@@ -218,5 +221,4 @@ def default_out_dir(args: argparse.Namespace) -> Optional[str]:
 
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec="seconds")
-
 
