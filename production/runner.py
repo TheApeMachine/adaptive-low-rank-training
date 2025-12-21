@@ -14,8 +14,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 
+from production.memory_utils import device_synchronize, empty_device_cache, get_device_mem_stats
+
 
 def run_single(args: argparse.Namespace, device: torch.device) -> None:
+    # Make stdout/stderr line-buffered even when piped (common in IDE consoles).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     # Local import so CLI --help doesn't require torch/tiktoken.
     from production.data import (
         determine_vocab_size,
@@ -33,90 +45,19 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     except Exception:
         tiktoken = None  # type: ignore
 
-    def _csv_ints(s: Optional[str]) -> Tuple[int, ...]:
-        if s is None:
-            return ()
-        parts: List[int] = []
-        for x in str(s).split(","):
-            x = x.strip()
-            if not x:
-                continue
-            try:
-                parts.append(int(x))
-            except Exception:
-                pass
-        return tuple(parts)
+    # Self-optimization is always enabled and non-configurable: the system chooses the policy.
+    #
+    # NOTE: We still persist/cache tuned plans for reuse, but callers cannot override tuning knobs.
+    cache_path = None
+    try:
+        out_dir = str(getattr(args, "out_dir", "") or "")
+        if out_dir:
+            parent = os.path.dirname(out_dir.rstrip(os.sep)) or "."
+            cache_path = os.path.join(parent, "selfopt_cache.json")
+    except Exception:
+        cache_path = None
 
-    def _csv_strs(s: Optional[str]) -> Tuple[str, ...]:
-        if s is None:
-            return ()
-        parts: List[str] = []
-        for x in str(s).split(","):
-            x = x.strip()
-            if x:
-                parts.append(x)
-        return tuple(parts)
-
-    # Self-optimization is on by default (intent-first UX). Use --no-selfopt to opt out.
-    self_opt_cfg: Optional[KVSelfOptConfig] = None
-    if not bool(getattr(args, "no_selfopt", False)):
-        mode = str(getattr(args, "self_opt", "none"))
-        if mode not in ("startup", "online"):
-            mode = "online"
-
-        cache_path = getattr(args, "self_opt_cache", None)
-        if (not cache_path) and getattr(args, "out_dir", None):
-            cache_path = os.path.join(str(args.out_dir), "selfopt_cache.json")
-
-        self_opt_cfg = KVSelfOptConfig(
-            mode=mode,
-            scope=str(getattr(args, "self_opt_scope", "all")),
-            decode_blocks=_csv_ints(getattr(args, "self_opt_decode_blocks", None)) or (256, 512, 1024, 2048),
-            block_ns=_csv_ints(getattr(args, "self_opt_block_n", None)) or (128,),
-            warps=_csv_ints(getattr(args, "self_opt_warps", None)) or (4, 8),
-            stages=_csv_ints(getattr(args, "self_opt_stages", None)) or (2, 3),
-            kernel_profiles=str(getattr(args, "self_opt_kernel_profiles", "auto")),
-            expert_launch_space=bool(getattr(args, "self_opt_expert_launch_space", False)),
-            warmup=int(getattr(args, "self_opt_warmup", 1)),
-            iters=int(getattr(args, "self_opt_iters", 3)),
-            interval=int(getattr(args, "self_opt_interval", 256)),
-            hysteresis=float(getattr(args, "self_opt_hysteresis", 0.03)),
-            cache_path=cache_path,
-            verbose=bool(getattr(args, "self_opt_verbose", False)),
-            verify=bool(getattr(args, "self_opt_verify", False)),
-            verify_tol=float(getattr(args, "self_opt_verify_tol", 5e-3)),
-            residuals=_csv_ints(getattr(args, "self_opt_residuals", None)) or (0, 32, 64, 128),
-            qblocks=_csv_ints(getattr(args, "self_opt_qblocks", None)) or (16, 32, 64),
-            k_sem_kinds=_csv_strs(getattr(args, "self_opt_k_sem_kinds", None)) or ("q4_0", "nf4", "q8_0", "fp16"),
-            k_geo_kinds=_csv_strs(getattr(args, "self_opt_k_geo_kinds", None)) or ("q8_0", "q4_0", "fp16"),
-            v_kinds=_csv_strs(getattr(args, "self_opt_v_kinds", None)) or ("q4_0", "q8_0", "fp16"),
-            mem_budget_mb=getattr(args, "self_opt_mem_budget_mb", None),
-            mem_overhead_frac=float(getattr(args, "self_opt_mem_overhead_frac", 0.10)),
-            policy_prefix_len=getattr(args, "self_opt_policy_prefix_len", None),
-            policy_warmup=int(getattr(args, "self_opt_policy_warmup", 1)),
-            policy_iters=int(getattr(args, "self_opt_policy_iters", 3)),
-            policy_hysteresis=float(getattr(args, "self_opt_policy_hysteresis", 0.02)),
-            prefer_lower_mem_within=float(getattr(args, "self_opt_prefer_low_mem_within", 0.02)),
-            policy_quality=bool(getattr(args, "self_opt_policy_quality", False)),
-            calib_tokens=getattr(args, "self_opt_calib_tokens", None),
-            calib_prefill=int(getattr(args, "self_opt_calib_prefill", 64)),
-            calib_decode_steps=int(getattr(args, "self_opt_calib_decode", 8)),
-            quality_tol=float(getattr(args, "self_opt_quality_tol", 0.5)),
-            quality_delta_nll_tol=getattr(args, "self_opt_quality_delta_nll_tol", None),
-            quality_ppl_ratio_tol=getattr(args, "self_opt_quality_ppl_ratio_tol", None),
-            quality_kl_tol=getattr(args, "self_opt_quality_kl_tol", None),
-            quality_compute_kl=bool(getattr(args, "self_opt_quality_kl", False)),
-            policy_quality_long=bool(getattr(args, "self_opt_policy_quality_long", False)),
-            calib_long_tokens=getattr(args, "self_opt_calib_long_tokens", None),
-            calib_long_prefill=int(getattr(args, "self_opt_calib_long_prefill", 4096)),
-            calib_long_decode_steps=int(getattr(args, "self_opt_calib_long_decode", 128)),
-            quality_long_tol=getattr(args, "self_opt_quality_long_tol", None),
-            quality_long_delta_nll_tol=getattr(args, "self_opt_quality_long_delta_nll_tol", None),
-            quality_long_ppl_ratio_tol=getattr(args, "self_opt_quality_long_ppl_ratio_tol", None),
-            quality_long_kl_tol=getattr(args, "self_opt_quality_long_kl_tol", None),
-            quality_long_compute_kl=bool(getattr(args, "self_opt_quality_long_kl", False)),
-            layerwise_cache=bool(getattr(args, "self_opt_layerwise_cache", False)),
-        )
+    self_opt_cfg: Optional[KVSelfOptConfig] = KVSelfOptConfig(mode="online", scope="all", cache_path=cache_path)
 
     # -------------------------
     # Sample mode
@@ -283,16 +224,28 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     if args.out_dir is None:
         raise ValueError("--out-dir is required for --mode train (or provide --size + --exp for auto dirs).")
 
-    data_path = Path(args.data)
-    fmt = infer_data_format(data_path, str(args.data_format))
-    tokens_any = load_tokens_any(path=data_path, fmt=fmt, data_dtype=str(args.data_dtype))
+    # For tokenized FineWeb-Edu / GPT-2 BPE streams, vocab_size is known and should not require scanning data.
+    if getattr(args, "vocab_size", None) is None and str(getattr(args, "tokenizer", "tiktoken")) == "tiktoken":
+        try:
+            args.vocab_size = 50257
+        except Exception:
+            pass
 
-    n_total = int(tokens_any.numel()) if isinstance(tokens_any, torch.Tensor) else int(len(tokens_any))
-    if n_total < int(args.block) + 2:
-        raise ValueError(f"Dataset too small: n_tokens={n_total} block={args.block}")
-
-    train_view, val_view = split_train_val(tokens_any, val_frac=float(args.val_frac))
-    vocab = determine_vocab_size(tokens_any=tokens_any, vocab_size=getattr(args, "vocab_size", None), tokenizer=str(args.tokenizer))
+    vocab = getattr(args, "vocab_size", None)
+    if vocab is None:
+        # Fallback: determine from data by scanning.
+        data_path = Path(args.data)
+        fmt = infer_data_format(data_path, str(args.data_format))
+        tokens_any = load_tokens_any(path=data_path, fmt=fmt, data_dtype=str(args.data_dtype))
+        vocab = determine_vocab_size(tokens_any=tokens_any, vocab_size=None, tokenizer=str(args.tokenizer))
+        n_total = int(tokens_any.numel()) if isinstance(tokens_any, torch.Tensor) else int(len(tokens_any))
+        train_view, val_view = split_train_val(tokens_any, val_frac=float(args.val_frac))
+    else:
+        data_path = Path(args.data)
+        fmt = infer_data_format(data_path, str(args.data_format))
+        tokens_any = None
+        train_view = None
+        val_view = None
 
     cfg = ModelConfig(
         vocab_size=int(vocab),
@@ -317,11 +270,102 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         dropout=float(args.dropout),
     )
 
-    if args.print_config:
-        print(json.dumps(asdict(cfg), indent=2, sort_keys=True))
+    # Always write resolved config for reproducibility and harness validation.
+    try:
+        os.makedirs(str(args.out_dir), exist_ok=True)
+        Path(os.path.join(str(args.out_dir), "resolved_config.json")).write_text(json.dumps(asdict(cfg), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    # Compact visibility into "intent → derived config" (minimal CLI by design, so we print this).
+    try:
+        def _fmt_int(x: Any) -> str:
+            try:
+                return f"{int(x):_d}"
+            except Exception:
+                return "?"
+
+        def _fmt_float(x: Any) -> str:
+            try:
+                return f"{float(x):.3g}"
+            except Exception:
+                return "?"
+
+        summ = getattr(args, "_selfopt_summary", None)
+        exp_s = str(getattr(args, "exp", None) or "")
+        data_s = str(getattr(args, "data", None) or "")
+        out_s = str(getattr(args, "out_dir", None) or "")
+
+        ds_tok = getattr(args, "dataset_tokens", None)
+        tp = getattr(args, "target_params", None)
+        ds_src = getattr(args, "dataset_tokens_source", None)
+        tp_src = getattr(args, "target_params_source", None)
+        layers_src = getattr(args, "layers_source", None)
+        exp_src = getattr(args, "exp_source", None)
+
+        head_dim = None
+        try:
+            head_dim = int(cfg.d_model // max(1, int(cfg.n_head)))
+        except Exception:
+            head_dim = None
+
+        print(
+            f"[intent] device={str(device)} exp={exp_s or '?'} ({exp_src or '?'}) data={os.path.basename(data_s) or '?'} "
+            f"dataset_tokens={_fmt_int(ds_tok)} ({ds_src or '?'}) target_params={_fmt_int(tp)} ({tp_src or '?'}) "
+            f"layers={int(cfg.n_layer)} ({layers_src or '?'}) out_dir={out_s or '?'}",
+            flush=True,
+        )
+        print(
+            f"[model] block={int(cfg.block_size)} d_model={int(cfg.d_model)} n_head={int(cfg.n_head)} head_dim={_fmt_int(head_dim)} "
+            f"d_ff={int(cfg.d_ff)} embed_dim={int(cfg.embed_dim)}",
+            flush=True,
+        )
+        print(
+            f"[attn] mode={str(cfg.attn_mode)} attn_dim={int(cfg.attn_dim)} sem_dim={int(cfg.sem_dim)} geo_dim={int(cfg.geo_dim)} "
+            f"rope={int(bool(cfg.rope))} tie_qk={int(bool(cfg.tie_qk))} null_attn={int(bool(cfg.null_attn))}",
+            flush=True,
+        )
+        print(
+            f"[traincfg] steps={getattr(args, 'steps', None)} lr={_fmt_float(getattr(args, 'lr', None))} "
+            f"wd={_fmt_float(getattr(args, 'weight_decay', None))} opt={str(getattr(args, 'optimizer', ''))} "
+            f"sched={str(getattr(args, 'lr_schedule', ''))} warmup={_fmt_int(getattr(args, 'warmup_steps', None))} "
+            f"min_lr={_fmt_float(getattr(args, 'min_lr', None))}",
+            flush=True,
+        )
+        try:
+            if self_opt_cfg is None:
+                # Shouldn't happen (selfopt is always enabled), but keep logs robust.
+                print("[selfopt] mode=startup", flush=True)
+            else:
+                print(
+                    f"[selfopt] mode={str(getattr(self_opt_cfg, 'mode', ''))} scope={str(getattr(self_opt_cfg, 'scope', ''))} "
+                    f"cache={str(getattr(self_opt_cfg, 'cache_path', '') or '')}",
+                    flush=True,
+                )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Config-only fast path (used by the paper harness): avoid loading/scanning the dataset.
+    # NOTE: `--steps <0` means AUTO and should *train*; only `--steps 0` is validate-only.
+    if int(getattr(args, "steps", 0)) == 0:
         return
 
-    os.makedirs(str(args.out_dir), exist_ok=True)
+    # If we didn't load tokens earlier, load now for training.
+    if tokens_any is None:
+        try:
+            print(f"[data] loading tokens: {str(data_path)} (format={fmt})", flush=True)
+        except Exception:
+            pass
+        tokens_any = load_tokens_any(path=data_path, fmt=fmt, data_dtype=str(args.data_dtype))
+        n_total = int(tokens_any.numel()) if isinstance(tokens_any, torch.Tensor) else int(len(tokens_any))
+        train_view, val_view = split_train_val(tokens_any, val_frac=float(args.val_frac))
+        try:
+            print(f"[data] ready: n_tokens={n_total} train={len(train_view)} val={len(val_view)}", flush=True)
+        except Exception:
+            pass
+
     model = GPT(cfg).to(device)
 
     # Parameter dtype.
@@ -334,81 +378,102 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         except Exception:
             return False
 
-    def resolve_dtype(dev: torch.device, spec: str, *, default: torch.dtype) -> torch.dtype:
-        spec = str(spec).lower()
-        if spec in ("fp32", "float32", "f32"):
-            return torch.float32
-        if spec in ("bf16", "bfloat16"):
-            dt = torch.bfloat16
-        elif spec in ("fp16", "float16", "f16"):
-            dt = torch.float16
-        else:
-            dt = default
-        if dev.type in ("cuda", "mps"):
-            if dt in (torch.float16, torch.bfloat16) and not _supports_dtype(dev, dt):
-                if dt == torch.float16 and _supports_dtype(dev, torch.bfloat16):
-                    return torch.bfloat16
-                return torch.float32
-        if dev.type == "cpu" and dt == torch.float16:
-            return torch.float32
-        return dt
+    # Always-on self-optimizer: derive dtype/AMP/batch/compile policy (no user overrides).
+    from production.selfopt_controller import SelfOptController
 
-    param_dtype = resolve_dtype(device, str(args.param_dtype), default=torch.float32)
-    if param_dtype != torch.float32:
-        model = model.to(dtype=param_dtype)
+    # Dataset feasibility caps (split-aware): runtime seq lengths must fit both splits.
+    train_seq_cap = int(max(2, int(len(train_view)) - 2))
+    eval_seq_cap = int(max(2, int(len(val_view)) - 2))
 
+    # Decision log is per-run (reproducible record of what the optimizer chose).
+    selfopt_log_path = None
     try:
-        model.grad_checkpointing = bool(args.grad_checkpoint)
+        selfopt_log_path = os.path.join(str(args.out_dir), "selfopt_decisions.jsonl")
+    except Exception:
+        selfopt_log_path = None
+
+    controller = SelfOptController(
+        cache_path=getattr(self_opt_cfg, "cache_path", None),
+        log_path=selfopt_log_path,
+        device=device,
+        cfg=cfg,
+    )
+    model, runtime_plan = controller.plan_runtime(
+        model=model,
+        train_view=train_view,
+        val_view=val_view,
+        get_batch=lambda bs, sl: get_batch_any(train_view, batch_size=int(bs), block_size=int(sl), device=device),
+        train_seq_len_cap=train_seq_cap,
+        eval_seq_len_cap=eval_seq_cap,
+    )
+
+    # Apply plan to args for downstream logging/scheduling.
+    try:
+        args.train_seq_len = int(runtime_plan.train_seq_len)
+        args.eval_seq_len = int(runtime_plan.eval_seq_len)
+    except Exception:
+        pass
+    try:
+        by_seq = runtime_plan.batch_plan.by_seq
+        args.batch_by_seq = ",".join([f"{int(k)}:{int(v[0])}x{int(v[1])}" for k, v in sorted(by_seq.items())])
+        bs0, ga0 = by_seq.get(int(runtime_plan.train_seq_len), next(iter(by_seq.values())))
+        args.batch_size = int(bs0)
+        args.grad_accum = int(ga0)
+    except Exception:
+        pass
+    try:
+        args.compile = bool(getattr(runtime_plan.compile_plan, "enabled", False))
+        args.compile_mode = str(getattr(runtime_plan.compile_plan, "mode", "reduce-overhead"))
+    except Exception:
+        pass
+    try:
+        pd = runtime_plan.param_dtype
+        args.param_dtype = ("bf16" if pd == torch.bfloat16 else ("fp16" if pd == torch.float16 else "fp32"))
     except Exception:
         pass
 
-    # torch.compile can be very expensive across many input shapes; for training autotune we
-    # intentionally skip compile so the probe finishes quickly and doesn't look "hung" while compiling.
-    compile_requested = bool(getattr(args, "compile", False))
-    compile_explicit = "--compile" in sys.argv
-    autotune_off = str(getattr(args, "train_autotune", "off")).lower() == "off"
-    if compile_requested and hasattr(torch, "compile") and autotune_off:
-        # MPS + torch.compile is still experimental and can introduce correctness issues for some models.
-        # Only enable it on MPS when the user explicitly asked for it via --compile.
-        if device.type == "mps" and not compile_explicit:
-            print("[warn] skipping torch.compile on MPS (pass --compile explicitly to force-enable).")
-        else:
-            try:
-                model = torch.compile(model, mode=str(args.compile_mode))
-                print(f"torch.compile enabled (mode={args.compile_mode}).")
-            except Exception as e:
-                print(f"torch.compile failed, continuing without it: {e}")
-    elif compile_requested and (not autotune_off):
-        print("[autotune] skipping torch.compile during training autotune (too slow across many shapes).")
-
-    # Ensure training-only flags survive compile wrappers.
+    amp_state = {"enabled": bool(runtime_plan.amp_enabled), "dtype": runtime_plan.amp_dtype}
     try:
-        model.grad_checkpointing = bool(args.grad_checkpoint)
+        args.amp = bool(amp_state["enabled"])
+        args.amp_dtype = ("bf16" if amp_state["dtype"] == torch.bfloat16 else "fp16")
     except Exception:
         pass
+    amp_enabled = bool(amp_state["enabled"])
+    amp_dtype = amp_state["dtype"]
+    amp_disabled_due_to_nonfinite = False
 
-    # AMP context
-    amp_enabled = bool(getattr(args, "amp", False))
-    amp_dtype = torch.bfloat16 if str(getattr(args, "amp_dtype", "bf16")) == "bf16" else torch.float16
-    if device.type == "cpu":
-        # CPU autocast is limited; allow but default to disabled.
+    try:
+        # Start with checkpointing disabled; enable only if we hit OOM at small batches.
+        args.grad_checkpoint = False
+        model.grad_checkpointing = False
+    except Exception:
         pass
 
     @contextlib.contextmanager
     def autocast_ctx():
-        if not amp_enabled:
+        if not bool(amp_state["enabled"]):
             yield
             return
         if device.type == "cuda":
-            with torch.autocast("cuda", dtype=amp_dtype):
+            with torch.autocast("cuda", dtype=amp_state["dtype"]):
                 yield
             return
         if device.type == "mps":
-            with torch.autocast("mps", dtype=amp_dtype):
+            with torch.autocast("mps", dtype=amp_state["dtype"]):
                 yield
             return
         with torch.autocast("cpu", dtype=torch.bfloat16):
             yield
+
+    # Optional GradScaler (CUDA fp16 only). BF16 does not require scaling.
+    scaler = None
+    try:
+        if bool(amp_state["enabled"]) and device.type == "cuda" and amp_state["dtype"] == torch.float16:
+            from torch.cuda.amp import GradScaler  # type: ignore
+
+            scaler = GradScaler()
+    except Exception:
+        scaler = None
 
     # Optimizer
     def _parse_two_floats(s: str, default: Tuple[float, float]) -> Tuple[float, float]:
@@ -461,23 +526,45 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         opt = Lion(model.parameters(), lr=float(args.lr), betas=lion_betas, weight_decay=float(args.weight_decay))
     else:
         adam_betas = _parse_two_floats(str(args.adam_betas), (0.9, 0.95))
-        opt_kwargs: Dict[str, Any] = dict(
+        base_opt_kwargs: Dict[str, Any] = dict(
             lr=float(args.lr),
             betas=adam_betas,
             eps=float(args.adam_eps),
             weight_decay=float(args.weight_decay),
         )
-        # foreach/fused are best-effort; ignore if unsupported.
-        if bool(getattr(args, "opt_foreach", False)):
-            opt_kwargs["foreach"] = True
-        if bool(getattr(args, "opt_fused", False)):
-            opt_kwargs["fused"] = True
-        try:
-            opt = torch.optim.AdamW(model.parameters(), **opt_kwargs)
-        except TypeError:
-            opt_kwargs.pop("foreach", None)
-            opt_kwargs.pop("fused", None)
-            opt = torch.optim.AdamW(model.parameters(), **opt_kwargs)
+
+        # Optimizer backend is a pure performance knob; choose automatically unless explicitly requested.
+        want_foreach = bool(getattr(args, "opt_foreach", False))
+        want_fused = bool(getattr(args, "opt_fused", False))
+        if (not want_foreach) and (not want_fused):
+            if device.type == "cuda":
+                want_fused = True
+            else:
+                want_foreach = True
+
+        candidates: List[Tuple[str, Dict[str, Any]]] = []
+        if want_fused:
+            candidates.append(("fused", {**base_opt_kwargs, "fused": True}))
+        if want_foreach:
+            candidates.append(("foreach", {**base_opt_kwargs, "foreach": True}))
+        candidates.append(("default", dict(base_opt_kwargs)))
+
+        opt = None
+        last_err: Optional[BaseException] = None
+        for name, kw in candidates:
+            try:
+                opt = torch.optim.AdamW(model.parameters(), **kw)
+                try:
+                    args.opt_fused = bool(name == "fused")
+                    args.opt_foreach = bool(name == "foreach")
+                except Exception:
+                    pass
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if opt is None:
+            raise RuntimeError(f"Could not construct AdamW optimizer (last error: {last_err})") from last_err
 
     def _first_nonfinite_grad(model: torch.nn.Module) -> Optional[str]:
         """Return a short description of the first parameter with a non-finite grad, if any."""
@@ -572,25 +659,6 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     t_start = time.time()
     tok_count = 0
 
-    def device_synchronize(dev: torch.device) -> None:
-        try:
-            if dev.type == "cuda" and torch.cuda.is_available():
-                torch.cuda.synchronize(dev)
-            elif dev.type == "mps":
-                if hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
-                    torch.mps.synchronize()
-        except Exception:
-            pass
-
-    def _empty_device_cache(dev: torch.device) -> None:
-        try:
-            if dev.type == "cuda" and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            elif dev.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                torch.mps.empty_cache()
-        except Exception:
-            pass
-
     def _is_oom_error(e: BaseException) -> bool:
         msg = str(e).lower()
         return (
@@ -600,22 +668,6 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
             or ("mps backend out of memory" in msg)
             or ("resource exhausted" in msg)
         )
-
-    def get_device_mem_stats(dev: torch.device) -> Dict[str, float]:
-        out: Dict[str, float] = {}
-        try:
-            if dev.type == "cuda" and torch.cuda.is_available():
-                out["cuda_mem_alloc_bytes"] = float(torch.cuda.memory_allocated(dev))
-                out["cuda_mem_reserved_bytes"] = float(torch.cuda.memory_reserved(dev))
-            elif dev.type == "mps":
-                if hasattr(torch, "mps"):
-                    if hasattr(torch.mps, "current_allocated_memory"):
-                        out["mps_mem_alloc_bytes"] = float(torch.mps.current_allocated_memory())
-                    if hasattr(torch.mps, "driver_allocated_memory"):
-                        out["mps_mem_driver_bytes"] = float(torch.mps.driver_allocated_memory())
-        except Exception:
-            pass
-        return out
 
     def _parse_seq_schedule(spec: Optional[str]) -> Optional[List[Tuple[int, int]]]:
         if spec is None:
@@ -753,19 +805,227 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
             eval_seq = int(args.block)
         eval_seq = int(min(max(2, eval_seq), int(cfg.block_size)))
 
+        def _loss_from_features(feats: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            # Compute CE loss without materializing full (B,T,V) logits at once.
+            # This is crucial on MPS where huge logits tensors can be unstable.
+            B, T, _D = feats.shape
+            _ = B
+            Wt = model.tok_emb.weight.t()  # (D, V)
+            V = int(Wt.shape[1])
+            loss_sum = torch.zeros([], device=feats.device, dtype=torch.float32)
+            # Keep chunks small enough for MPSGraph stability.
+            chunk = 64 if feats.device.type == "mps" else 256
+            chunk = int(max(1, min(int(T), int(chunk))))
+            for i in range(0, int(T), int(chunk)):
+                j = min(int(T), i + int(chunk))
+                lg = feats[:, i:j, :] @ Wt  # (B, chunk, V)
+                loss_sum = loss_sum + F.cross_entropy(lg.reshape(-1, V), y[:, i:j].reshape(-1), reduction="sum").float()
+            denom = int(y.numel()) if int(y.numel()) > 0 else 1
+            return loss_sum / float(denom)
+
         for _ in range(int(eval_iters)):
             xb, yb = get_batch_any(train_view, batch_size=bs, block_size=eval_seq, device=device)
             with autocast_ctx():
-                logits, _ = model(xb)
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                if device.type == "mps":
+                    feats, _ = model(xb, return_features=True)
+                    loss = _loss_from_features(feats, yb)
+                else:
+                    logits, _ = model(xb)
+                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
             losses_tr.append(float(loss.detach().to("cpu").item()))
             xb, yb = get_batch_any(val_view, batch_size=bs, block_size=eval_seq, device=device)
             with autocast_ctx():
-                logits, _ = model(xb)
-                loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                if device.type == "mps":
+                    feats, _ = model(xb, return_features=True)
+                    loss = _loss_from_features(feats, yb)
+                else:
+                    logits, _ = model(xb)
+                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
             losses_va.append(float(loss.detach().to("cpu").item()))
         model.train()
         return float(sum(losses_tr) / max(1, len(losses_tr))), float(sum(losses_va) / max(1, len(losses_va)))
+
+    # -------------------------
+    # AUTO: steps / seq_schedule / batch plan
+    # -------------------------
+    # Any time a value would have been provided by an "expert flag", we treat it as AUTO unless
+    # explicitly set in the harness (and even then, the runner may override for safety).
+    #
+    # This is the core "self-optimizing" contract: intent in, runtime plan out.
+    try:
+        from production.config import infer_dataset_tokens_from_path
+    except Exception:
+        infer_dataset_tokens_from_path = None  # type: ignore
+
+    # Treat missing/zero as AUTO for these.
+    raw_steps = int(getattr(args, "steps", -1) if getattr(args, "steps", None) is not None else -1)
+    raw_bs = int(getattr(args, "batch_size", 0) if getattr(args, "batch_size", None) is not None else 0)
+    raw_ga = int(getattr(args, "grad_accum", 0) if getattr(args, "grad_accum", None) is not None else 0)
+    raw_seq_sched = getattr(args, "seq_schedule", None) if hasattr(args, "seq_schedule") else None
+
+    want_auto_steps = bool(raw_steps < 0)
+    want_auto_batch = bool(raw_bs <= 0 or raw_ga <= 0)
+    want_auto_sched = bool(raw_seq_sched in (None, "", "auto"))
+
+    # Build stage seq_lens from the resolved runtime training context.
+    # This must satisfy the dataset constraints; `args.train_seq_len` is derived above after splitting.
+    stage_lens: List[int] = []
+    max_train_seq = int(getattr(args, "train_seq_len", 0) or 0)
+    if max_train_seq <= 0:
+        max_train_seq = int(cfg.block_size)
+    max_train_seq = int(min(max_train_seq, int(cfg.block_size)))
+
+    for cand in (1024, 2048, int(max_train_seq)):
+        if cand <= int(max_train_seq):
+            stage_lens.append(int(cand))
+    stage_lens = sorted({int(x) for x in stage_lens if int(x) > 0})
+    if not stage_lens:
+        stage_lens = [int(max(2, int(max_train_seq)))]
+
+    # If training selfopt is enabled, compute an AUTO batch plan for the stage seqs.
+    # This is used both for training throughput and for deriving steps/schedules.
+    auto_plan: Optional[Dict[int, Tuple[int, int]]] = _parse_batch_by_seq(getattr(args, "batch_by_seq", None))
+    if auto_plan:
+        try:
+            parts = [f"{k}:{v[0]}x{v[1]}" for k, v in sorted(auto_plan.items())]
+            print(f"[selfopt][train] startup plan: " + ", ".join(parts), flush=True)
+        except Exception:
+            pass
+    elif (self_opt_cfg is not None) and str(getattr(self_opt_cfg, "mode", "none")) != "none" and (want_auto_batch or want_auto_steps or want_auto_sched):
+        # Should be rare: the controller normally pre-populates `batch_by_seq`.
+        try:
+            from production.train_tuning import tune_batch_by_seq
+
+            plan = tune_batch_by_seq(
+                cache_path=getattr(self_opt_cfg, "cache_path", None),
+                device=device,
+                cfg=cfg,
+                model=model,
+                get_batch=lambda bs, sl: get_batch_any(train_view, batch_size=int(bs), block_size=int(sl), device=device),
+                seq_lens=list(stage_lens),
+                target_gbs=0,
+                warmup=1,
+                iters=2,
+                verbose=False,
+                amp_enabled=bool(amp_enabled),
+                amp_dtype=amp_dtype,
+            )
+            auto_plan = {int(k): (int(v[0]), int(v[1])) for k, v in plan.by_seq.items()}
+        except Exception:
+            auto_plan = None
+
+    # Derive steps and seq_schedule from dataset token budget + derived batch plan.
+    #
+    # NOTE: We target *train* tokens (i.e., excluding the validation split) so that AUTO steps corresponds
+    # more directly to "1 epoch" over the training set.
+    if (want_auto_steps or want_auto_sched) and (infer_dataset_tokens_from_path is not None):
+        dataset_tokens_total = None
+        try:
+            dataset_tokens_total = getattr(args, "dataset_tokens", None)
+        except Exception:
+            dataset_tokens_total = None
+        if dataset_tokens_total is None:
+            try:
+                dataset_tokens_total = infer_dataset_tokens_from_path(str(args.data))
+            except Exception:
+                dataset_tokens_total = None
+
+        if dataset_tokens_total is not None and int(dataset_tokens_total) > 0:
+            val_frac = float(getattr(args, "val_frac", 0.1) or 0.1)
+            val_frac = float(min(0.5, max(0.0, val_frac)))
+            dataset_tokens_train = int(max(1.0, float(dataset_tokens_total) * (1.0 - float(val_frac))))
+
+            # Token fractions per stage (in token-space, not step-space).
+            if len(stage_lens) >= 3:
+                fracs = [0.25, 0.35, 0.40]
+            elif len(stage_lens) == 2:
+                fracs = [0.40, 0.60]
+            else:
+                fracs = [1.0]
+
+            # Compute tokens-per-step per stage from the (auto) plan.
+            tps: List[int] = []
+            for s in stage_lens:
+                if auto_plan and int(s) in auto_plan:
+                    bs_s, ga_s = auto_plan[int(s)]
+                else:
+                    bs_s, ga_s = (max(1, raw_bs) if raw_bs > 0 else 1), (max(1, raw_ga) if raw_ga > 0 else 1)
+                tps.append(int(bs_s) * int(ga_s) * int(s))
+
+            steps_by_stage: List[int] = []
+            for frac, tok_per_step in zip(fracs, tps):
+                tok_target = int(max(1.0, float(dataset_tokens_train) * float(frac)))
+                steps_by_stage.append(int(math.ceil(float(tok_target) / max(1.0, float(tok_per_step)))))
+
+            total_steps_auto = int(sum(int(x) for x in steps_by_stage))
+            # Clamp absurdly small totals.
+            total_steps_auto = int(max(1, total_steps_auto))
+
+            if want_auto_steps:
+                try:
+                    args.steps = int(total_steps_auto)
+                except Exception:
+                    pass
+
+            if want_auto_sched:
+                # Build schedule boundaries in optimizer-step space.
+                starts: List[int] = [0]
+                cur = 0
+                for st in steps_by_stage[:-1]:
+                    cur += int(st)
+                    starts.append(int(cur))
+                parts = [f"{int(stage_lens[i])}@{int(starts[i])}" for i in range(len(stage_lens))]
+                sched = ",".join(parts)
+                try:
+                    args.seq_schedule = str(sched)
+                except Exception:
+                    pass
+
+            try:
+                parts_dbg: List[str] = []
+                for i, s in enumerate(stage_lens):
+                    tok_per_step = int(tps[i]) if i < len(tps) else 0
+                    st = int(steps_by_stage[i]) if i < len(steps_by_stage) else 0
+                    gbs = None
+                    if auto_plan and int(s) in auto_plan:
+                        bs_s, ga_s = auto_plan[int(s)]
+                        gbs = int(bs_s) * int(ga_s)
+                    parts_dbg.append(
+                        f"{int(s)}:tok/step={tok_per_step} steps={st}" + ("" if gbs is None else f" gbs={gbs}")
+                    )
+                seq_sched_s = getattr(args, "seq_schedule", None)
+                print(
+                    f"[selfopt][train] auto steps={int(getattr(args, 'steps', total_steps_auto))} "
+                    f"(train_tokens={int(dataset_tokens_train)} total_tokens={int(dataset_tokens_total)} val_frac={val_frac:g}): "
+                    + ", ".join(parts_dbg)
+                    + ("" if not seq_sched_s else f" seq_schedule={seq_sched_s}"),
+                    flush=True,
+                )
+            except Exception:
+                pass
+
+    # Materialize defaults for the training loop from the derived plan.
+    if want_auto_batch and auto_plan:
+        base_s = int(stage_lens[0])
+        if base_s in auto_plan:
+            bs0, ga0 = auto_plan[base_s]
+            try:
+                args.batch_size = int(bs0)
+                args.grad_accum = int(ga0)
+            except Exception:
+                pass
+
+    # Derive eval/save cadence if missing/auto (0).
+    try:
+        if int(getattr(args, "eval_every", 0) or 0) <= 0:
+            # About ~1000 evals max; cap cost.
+            args.eval_every = int(max(1000, min(5000, int(getattr(args, "steps", 1)) // 1000)))
+        if int(getattr(args, "save_every", 0) or 0) <= 0:
+            args.save_every = int(max(2000, int(getattr(args, "eval_every", 1000))))
+        if int(getattr(args, "log_every", 0) or 0) <= 0:
+            args.log_every = int(max(50, int(getattr(args, "eval_every", 1000)) // 10))
+    except Exception:
+        pass
 
     # Training schedule: interpret schedule steps in optimizer-step space (v29/v30 semantics).
     seq_schedule = _parse_seq_schedule(getattr(args, "seq_schedule", None))
@@ -776,132 +1036,12 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
         base_seq_len = int(cfg.block_size)
     base_seq_len = int(min(max(2, base_seq_len), int(cfg.block_size)))
 
-    grad_accum_default = max(1, int(getattr(args, "grad_accum", 1)))
-    micro_bs_default = max(1, int(getattr(args, "batch_size", 1)))
+    grad_accum_default = max(1, int(getattr(args, "grad_accum", 0) or 0))
+    micro_bs_default = max(1, int(getattr(args, "batch_size", 0) or 0))
 
-    # Opt-in training autotune: run short probes and exit (no training run performed).
-    if str(getattr(args, "train_autotune", "off")).lower() != "off":
-        mode = str(getattr(args, "train_autotune", "off")).lower()
-        if mode == "quick":
-            target_gbs = max(1, int(getattr(args, "train_autotune_gbs", 64)))
-            try:
-                bs_list = [int(x) for x in str(getattr(args, "train_autotune_batch_sizes", "")).split(",") if x.strip()]
-            except Exception:
-                bs_list = [1, 2, 4, 8, 16, 24, 32, 48, 64]
-            # Try larger micro-batches first: they tend to be faster (less grad-accum overhead) and this
-            # avoids spending forever benchmarking tiny microbatches (e.g. bs=1, ga=64).
-            bs_list = sorted({max(1, int(x)) for x in bs_list}, reverse=True)
-            try:
-                seq_list = [int(x) for x in str(getattr(args, "train_autotune_seq_lens", "")).split(",") if x.strip()]
-            except Exception:
-                seq_list = [512, 1024, 2048]
-            seq_list = [min(int(cfg.block_size), max(2, int(s))) for s in seq_list]
-            seq_list = sorted({int(s) for s in seq_list})
-            warm = max(0, int(getattr(args, "train_autotune_warmup", 1)))
-            iters = max(1, int(getattr(args, "train_autotune_iters", 3)))
-            max_driver_gb = float(getattr(args, "train_autotune_max_driver_gb", 0.0) or 0.0)
-
-            def mem_driver_gb() -> float:
-                m = get_device_mem_stats(device)
-                if device.type == "mps":
-                    b = float(m.get("mps_mem_driver_bytes", 0.0))
-                elif device.type == "cuda":
-                    b = float(m.get("cuda_mem_reserved_bytes", 0.0))
-                else:
-                    b = 0.0
-                return b / (1024.0**3)
-
-            print("[autotune] production training autotune enabled: probing candidates and then exiting.")
-            best: Optional[Dict[str, Any]] = None
-            best_by_seq: Dict[int, Dict[str, Any]] = {}
-            for s in seq_list:
-                print(f"[autotune] seq_len={s} (<= block={cfg.block_size})")
-                best_s: Optional[Dict[str, Any]] = None
-                for bs_try in bs_list:
-                    # MPSGraph limitation: some ops (notably large logits tensors) fail when tensor numel exceeds INT_MAX.
-                    # A practical proxy is B * T * vocab_size for logits in cross-entropy.
-                    if device.type == "mps":
-                        try:
-                            max_elems = 2_147_483_647  # INT_MAX
-                            logits_elems = int(bs_try) * int(s) * int(cfg.vocab_size)
-                            if logits_elems > max_elems:
-                                print(f"[autotune]   skipping bs={bs_try} (B*T*V={logits_elems} > INT_MAX) on MPS")
-                                continue
-                        except Exception:
-                            pass
-                    ga_try = max(1, target_gbs // bs_try)
-                    gbs_eff = bs_try * ga_try
-                    if gbs_eff < max(1, target_gbs // 4):
-                        continue
-                    print(f"[autotune]   trying bs={bs_try} ga={ga_try} (gbs={gbs_eff}) ...")
-                    ok = True
-                    peak = mem_driver_gb()
-                    tok = 0
-                    try:
-                        model.train()
-                        for _ in range(warm):
-                            opt.zero_grad(set_to_none=True)
-                            for _m in range(ga_try):
-                                xb, yb = get_batch_any(train_view, batch_size=bs_try, block_size=s, device=device)
-                                with autocast_ctx():
-                                    logits, _ = model(xb)
-                                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
-                                (loss / ga_try).backward()
-                            if float(getattr(args, "grad_clip", 0.0)) > 0:
-                                if device.type == "mps":
-                                    _ = _clip_grad_norm_fp32(model.parameters(), float(args.grad_clip))
-                                else:
-                                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
-                            opt.step()
-                            peak = max(peak, mem_driver_gb())
-                        device_synchronize(device)
-                        t0 = time.perf_counter()
-                        for _ in range(iters):
-                            opt.zero_grad(set_to_none=True)
-                            for _m in range(ga_try):
-                                xb, yb = get_batch_any(train_view, batch_size=bs_try, block_size=s, device=device)
-                                with autocast_ctx():
-                                    logits, _ = model(xb)
-                                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
-                                (loss / ga_try).backward()
-                            if float(getattr(args, "grad_clip", 0.0)) > 0:
-                                if device.type == "mps":
-                                    _ = _clip_grad_norm_fp32(model.parameters(), float(args.grad_clip))
-                                else:
-                                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
-                            opt.step()
-                            tok += int(bs_try) * int(ga_try) * int(s)
-                            peak = max(peak, mem_driver_gb())
-                            if max_driver_gb > 0 and peak > max_driver_gb:
-                                ok = False
-                                break
-                        device_synchronize(device)
-                        dt = time.perf_counter() - t0
-                        tok_s = float(tok / max(dt, 1e-9)) if ok else 0.0
-                    except Exception as e:
-                        ok = False
-                        tok_s = 0.0
-                        print(f"[autotune] bs={bs_try} ga={ga_try} (gbs={gbs_eff}) failed: {e}")
-                    rec = {"seq_len": int(s), "batch_size": int(bs_try), "grad_accum": int(ga_try), "gbs": int(gbs_eff), "tok_s": float(tok_s), "peak_driver_gb": float(peak), "ok": bool(ok)}
-                    if ok:
-                        print(f"[autotune]     ok tok/s={tok_s:.0f} peak_driver={peak:.1f}GB")
-                    if ok and (best_s is None or rec["tok_s"] > float(best_s["tok_s"])):
-                        best_s = rec
-                if best_s is not None:
-                    print(f"[autotune] best@{s}: tok/s={best_s['tok_s']:.0f} bs={best_s['batch_size']} ga={best_s['grad_accum']} peak_driver={best_s['peak_driver_gb']:.1f}GB")
-                    best = best_s  # keep last (largest seq in list) best
-                    best_by_seq[int(s)] = dict(best_s)
-            if best is not None:
-                print("[autotune] recommendation (copy/paste): "
-                      f"--batch-size {best['batch_size']} --grad-accum {best['grad_accum']} --train-seq-len {best['seq_len']}")
-            if best_by_seq:
-                parts = []
-                for seq_k in sorted(best_by_seq.keys()):
-                    r = best_by_seq[seq_k]
-                    parts.append(f"{int(seq_k)}:{int(r['batch_size'])}x{int(r['grad_accum'])}")
-                print('[autotune] batch-by-seq suggestion (copy/paste): --batch-by-seq "' + ",".join(parts) + '"')
-            print("[autotune] done. Exiting now (no training run performed).")
-            return
+    # Batch policy comes from the controller via `args.batch_by_seq`; just apply the base default.
+    if batch_by_seq is not None and int(base_seq_len) in batch_by_seq:
+        micro_bs_default, grad_accum_default = batch_by_seq[int(base_seq_len)]
 
     # Timing accumulators for throughput measurement (optimizer steps)
     dt_acc = 0.0
@@ -911,10 +1051,19 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     opt_acc = 0.0
     steps_in_acc = 0
 
-    # Non-finite handling (opt-in via --nan-policy)
-    nan_policy = str(getattr(args, "nan_policy", "error")).lower()
+    # Non-finite handling: default to a self-healing policy (reduce LR and skip the step).
+    nan_policy = str(getattr(args, "nan_policy", "reduce_lr")).lower()
+    if nan_policy not in ("reduce_lr", "skip", "error"):
+        nan_policy = "reduce_lr"
     nan_lr_decay = float(getattr(args, "nan_lr_decay", 0.5) or 0.5)
+    try:
+        args.nan_policy = str(nan_policy)
+        args.nan_lr_decay = float(nan_lr_decay)
+    except Exception:
+        pass
     lr_mult = 1.0
+    consecutive_nonfinite = 0
+    max_consecutive_nonfinite = 8  # hard stop to avoid burning time on a broken config/backend
 
     model.train()
     opt.zero_grad(set_to_none=True)
@@ -932,7 +1081,135 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     warned_auto_caps: set[int] = set()
     warned_mps_logits: set[int] = set()
 
-    for opt_step in range(1, total_opt_steps + 1):
+    # -------------------------
+    # Resume support (paper-critical)
+    # -------------------------
+    resume_path = None
+    if bool(getattr(args, "resume", False)):
+        resume_path = os.path.join(str(args.out_dir), "last.pt")
+    if getattr(args, "resume_path", None):
+        resume_path = str(getattr(args, "resume_path"))
+
+    start_opt_step = 1
+    if resume_path:
+        if not os.path.exists(str(resume_path)):
+            raise FileNotFoundError(f"--resume requested but checkpoint not found: {resume_path}")
+        ck = torch.load(str(resume_path), map_location=device)
+        if not isinstance(ck, dict) or "model" not in ck:
+            raise ValueError(f"Invalid resume checkpoint (expected dict with 'model'): {resume_path}")
+
+        # Strict config match by default (paper safety).
+        ck_cfg = ck.get("config", None)
+        if ck_cfg is not None:
+            want = asdict(cfg)
+            if isinstance(ck_cfg, dict) and ck_cfg != want and (not bool(getattr(args, "resume_allow_config_mismatch", False))):
+                raise ValueError(
+                    "Resume config mismatch. Refusing to resume because this can silently invalidate experiments. "
+                    "Pass --resume-allow-config-mismatch to override.\n"
+                    f"checkpoint={resume_path}"
+                )
+
+        try:
+            model.load_state_dict(ck["model"], strict=True)
+        except Exception:
+            model.load_state_dict(ck["model"], strict=False)
+
+        if "opt" not in ck:
+            raise ValueError(
+                f"Resume checkpoint does not contain optimizer state ('opt'). "
+                f"Re-run with a checkpoint produced by the resumable runner. checkpoint={resume_path}"
+            )
+        try:
+            opt.load_state_dict(ck["opt"])
+        except Exception as e:
+            if bool(getattr(args, "resume_allow_config_mismatch", False)):
+                print(f"[resume] optimizer state incompatible; continuing with fresh optimizer state: {e}")
+            else:
+                raise
+
+        if scaler is not None and ck.get("scaler", None) is not None:
+            try:
+                scaler.load_state_dict(ck["scaler"])
+            except Exception:
+                pass
+
+        try:
+            best_val = float(ck.get("best_val", best_val))
+        except Exception:
+            pass
+        try:
+            lr_mult = float(ck.get("lr_mult", lr_mult))
+        except Exception:
+            pass
+        try:
+            auto_bs_cap_by_seq = dict(ck.get("auto_bs_cap_by_seq", auto_bs_cap_by_seq))
+        except Exception:
+            pass
+
+        try:
+            last_done = int(ck.get("opt_step", 0))
+            start_opt_step = int(last_done) + 1
+        except Exception:
+            start_opt_step = 1
+
+        # RNG restore (best-effort).
+        try:
+            rng = ck.get("rng", None)
+            if isinstance(rng, dict):
+                import random
+
+                if "py_random" in rng:
+                    try:
+                        random.setstate(rng["py_random"])
+                    except Exception:
+                        pass
+                if "torch_cpu" in rng:
+                    try:
+                        torch.set_rng_state(rng["torch_cpu"])
+                    except Exception:
+                        pass
+                if device.type == "cuda" and "torch_cuda" in rng and torch.cuda.is_available():
+                    try:
+                        torch.cuda.set_rng_state_all(rng["torch_cuda"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        print(f"[resume] loaded {resume_path} (next_opt_step={start_opt_step}, best_val={best_val:.6g})")
+
+    def _make_full_ckpt(*, opt_step: int) -> Dict[str, Any]:
+        # RNG snapshot (best-effort; important for strict reproducibility).
+        rng: Dict[str, Any] = {}
+        try:
+            import random
+
+            rng["py_random"] = random.getstate()
+        except Exception:
+            pass
+        try:
+            rng["torch_cpu"] = torch.get_rng_state()
+        except Exception:
+            pass
+        try:
+            if device.type == "cuda" and torch.cuda.is_available():
+                rng["torch_cuda"] = torch.cuda.get_rng_state_all()
+        except Exception:
+            pass
+
+        return {
+            "model": model.state_dict(),
+            "config": asdict(cfg),
+            "opt": opt.state_dict(),
+            "scaler": (scaler.state_dict() if scaler is not None else None),
+            "opt_step": int(opt_step),
+            "best_val": float(best_val),
+            "lr_mult": float(lr_mult),
+            "auto_bs_cap_by_seq": dict(auto_bs_cap_by_seq),
+            "rng": rng,
+        }
+
+    for opt_step in range(int(start_opt_step), total_opt_steps + 1):
         last_step = opt_step
 
         # LR schedule
@@ -1077,14 +1354,29 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                             f"Out-of-range token ids detected at optimizer step {opt_step} micro={_micro+1}/{grad_accum_try}: "
                             f"xb_oob={x_oob} yb_oob={y_oob} xb[min,max]=[{x_min},{x_max}] yb[min,max]=[{y_min},{y_max}]"
                             + (f" dump={dump_path}" if dump_path else "")
-                            + ". This usually means --vocab-size is wrong or the batch got corrupted (e.g. torch.compile on MPS). "
-                              "Try --no-compile (and/or --no-amp) to isolate."
+                            + ". This usually means --vocab-size is wrong or the batch got corrupted. "
+                              "The self-optimizer will adapt runtime policy automatically; if this persists, treat it as a data/vocab mismatch."
                         )
 
                     t1 = time.perf_counter()
                     with autocast_ctx():
-                        logits, _ = model(xb)
-                        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
+                        if device.type == "mps":
+                            feats, _ = model(xb, return_features=True)
+                            Wt = model.tok_emb.weight.t()
+                            V = int(Wt.shape[1])
+                            loss_sum = torch.zeros([], device=device, dtype=torch.float32)
+                            chunk = int(max(1, min(int(seq_len), 64)))
+                            for i in range(0, int(seq_len), int(chunk)):
+                                j = min(int(seq_len), i + int(chunk))
+                                lg = feats[:, i:j, :] @ Wt
+                                loss_sum = loss_sum + F.cross_entropy(lg.reshape(-1, V), yb[:, i:j].reshape(-1), reduction="sum").float()
+                            denom = int(yb.numel()) if int(yb.numel()) > 0 else 1
+                            loss = loss_sum / float(denom)
+                            # For debug parity
+                            logits = None  # type: ignore[assignment]
+                        else:
+                            logits, _ = model(xb)
+                            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
                         loss_to_back = loss / grad_accum_try
 
                     # Accumulate loss without synchronizing to CPU (important for GPU throughput).
@@ -1123,24 +1415,29 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                         except Exception:
                             x_oob = -1
                             y_oob = -1
+                        lg_any_nan = False
+                        lg_any_inf = False
+                        lg_last_nan = False
+                        lg_last_inf = False
+                        lg_last_max_abs = float("nan")
                         try:
-                            lg = logits.detach()
-                            lg_any_nan = bool(torch.isnan(lg).any().detach().to("cpu").item())
-                            lg_any_inf = bool(torch.isinf(lg).any().detach().to("cpu").item())
-                        except Exception:
-                            lg_any_nan = False
-                            lg_any_inf = False
-                        try:
-                            lg_last = logits.detach()[0, -1, :].float()
+                            if device.type != "mps":
+                                lg = logits.detach()  # type: ignore[union-attr]
+                                lg_any_nan = bool(torch.isnan(lg).any().detach().to("cpu").item())
+                                lg_any_inf = bool(torch.isinf(lg).any().detach().to("cpu").item())
+                                lg_last = lg[0, -1, :].float()
+                            else:
+                                # When using chunked loss (no full logits), probe last-token logits cheaply.
+                                x_last = feats.detach()[0, -1, :].float()
+                                lg_last = (x_last @ model.tok_emb.weight.t().detach().float())
+                                lg_any_nan = bool(torch.isnan(feats.detach()).any().detach().to("cpu").item())
+                                lg_any_inf = bool(torch.isinf(feats.detach()).any().detach().to("cpu").item())
+
                             lg_last_nan = bool(torch.isnan(lg_last).any().to("cpu").item())
                             lg_last_inf = bool(torch.isinf(lg_last).any().to("cpu").item())
-                            lg_last_max_abs = float(
-                                torch.nan_to_num(lg_last, nan=0.0, posinf=0.0, neginf=0.0).abs().max().to("cpu").item()
-                            )
+                            lg_last_max_abs = float(torch.nan_to_num(lg_last, nan=0.0, posinf=0.0, neginf=0.0).abs().max().to("cpu").item())
                         except Exception:
-                            lg_last_nan = False
-                            lg_last_inf = False
-                            lg_last_max_abs = float("nan")
+                            pass
 
                         dump_path = None
                         try:
@@ -1172,13 +1469,32 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                         break
 
                     t2 = time.perf_counter()
-                    loss_to_back.backward()
+                    if scaler is None:
+                        loss_to_back.backward()
+                    else:
+                        scaler.scale(loss_to_back).backward()
                     bwd_step += time.perf_counter() - t2
 
                 t3 = time.perf_counter()
                 if nonfinite:
                     # Clear grads to avoid contaminating future steps.
                     opt.zero_grad(set_to_none=True)
+                    # Self-heal on MPS: if autocast is producing NaNs, disable AMP and retry immediately.
+                    if device.type == "mps" and bool(amp_state.get("enabled", False)) and (not amp_disabled_due_to_nonfinite):
+                        amp_state["enabled"] = False
+                        amp_disabled_due_to_nonfinite = True
+                        try:
+                            args.amp = False
+                        except Exception:
+                            pass
+                        print("[selfopt][train] disabling AMP on MPS due to non-finite loss; retrying step in fp32.")
+                        continue
+                    consecutive_nonfinite += 1
+                    if consecutive_nonfinite >= int(max_consecutive_nonfinite):
+                        raise RuntimeError(
+                            f"Aborting: {consecutive_nonfinite} consecutive non-finite steps. "
+                            f"Last detail: {nonfinite_detail or '(none)'}"
+                        )
                     if nan_policy == "reduce_lr":
                         lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
                         print(f"[warn] non-finite loss detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
@@ -1191,12 +1507,18 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                     else:
                         raise RuntimeError(
                             f"Non-finite loss detected at optimizer step {opt_step}. "
-                            f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, --no-compile, or --no-amp."
+                            "Try: lower the learning rate; the self-optimizer will also adapt runtime policy (precision/compile/batch) automatically."
                             + (f" Detail: {nonfinite_detail}" if nonfinite_detail else "")
                         )
                 else:
                     grad_clip = float(getattr(args, "grad_clip", 0.0) or 0.0)
                     if grad_clip > 0:
+                        # If using GradScaler, unscale before clipping so norms are meaningful.
+                        if scaler is not None:
+                            try:
+                                scaler.unscale_(opt)
+                            except Exception:
+                                pass
                         # On MPS + bf16 params, PyTorch's clip_grad_norm_ can produce a non-finite norm
                         # due to bf16 overflow during the norm reduction even when grads are finite.
                         if device.type == "mps":
@@ -1209,6 +1531,21 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                         # IMPORTANT: capture debug info BEFORE clearing grads.
                         extra = _first_nonfinite_grad(model)
                         opt.zero_grad(set_to_none=True)
+                        if device.type == "mps" and bool(amp_state.get("enabled", False)) and (not amp_disabled_due_to_nonfinite):
+                            amp_state["enabled"] = False
+                            amp_disabled_due_to_nonfinite = True
+                            try:
+                                args.amp = False
+                            except Exception:
+                                pass
+                            print("[selfopt][train] disabling AMP on MPS due to non-finite grads; retrying step in fp32.")
+                            continue
+                        consecutive_nonfinite += 1
+                        if consecutive_nonfinite >= int(max_consecutive_nonfinite):
+                            raise RuntimeError(
+                                f"Aborting: {consecutive_nonfinite} consecutive non-finite steps. "
+                                + (f" First bad grad: {extra}" if extra else "")
+                            )
                         if nan_policy == "reduce_lr":
                             lr_mult = max(1e-6, float(lr_mult) * float(nan_lr_decay))
                             print(f"[warn] non-finite grads detected @ step {opt_step}; skipping step and reducing lr_mult -> {lr_mult:.3g}")
@@ -1217,14 +1554,18 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
                         else:
                             raise RuntimeError(
                                 f"Non-finite gradients detected at optimizer step {opt_step}. "
-                                f"Try: --nan-policy reduce_lr, --no-learned-temp, --no-decoupled-gate, --grad-clip 0 (to isolate), "
-                                f"--no-compile, or --no-amp."
+                                "Try: lower the learning rate; the self-optimizer will also adapt runtime policy (precision/compile/batch) automatically."
                                 + (f" First bad grad: {extra}" if extra else "")
                             )
                     else:
-                        opt.step()
+                        if scaler is None:
+                            opt.step()
+                        else:
+                            scaler.step(opt)
+                            scaler.update()
                         opt.zero_grad(set_to_none=True)
                         opt_step_t = time.perf_counter() - t3
+                        consecutive_nonfinite = 0
 
                 if bool(getattr(args, "sync_timing", False)):
                     device_synchronize(device)
@@ -1234,14 +1575,63 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
             except RuntimeError as e:
                 if _is_oom_error(e):
                     if micro_bs_try <= 1:
+                        # Last-resort self-healing: try enabling checkpointing/AMP before bailing.
+                        try:
+                            if not bool(getattr(model, "grad_checkpointing", False)):
+                                print(f"[selfopt][train] OOM @ step {opt_step} with bs=1; enabling grad checkpointing and retrying.")
+                                try:
+                                    args.grad_checkpoint = True
+                                except Exception:
+                                    pass
+                                try:
+                                    model.grad_checkpointing = True
+                                except Exception:
+                                    pass
+                                empty_device_cache(device)
+                                continue
+                        except Exception:
+                            pass
+
+                        try:
+                            if (not bool(amp_state.get("enabled", False))) and device.type in ("cuda", "mps"):
+                                # Prefer bf16 when supported; otherwise fp16.
+                                dt: Optional[torch.dtype]
+                                if _supports_dtype(device, torch.bfloat16):
+                                    dt = torch.bfloat16
+                                elif _supports_dtype(device, torch.float16):
+                                    dt = torch.float16
+                                else:
+                                    dt = None
+                                if dt is None:
+                                    raise RuntimeError("No supported AMP dtype found for device")
+                                amp_state["enabled"] = True
+                                amp_state["dtype"] = dt
+                                try:
+                                    args.amp = True
+                                    args.amp_dtype = ("bf16" if dt == torch.bfloat16 else "fp16")
+                                except Exception:
+                                    pass
+                                if device.type == "cuda" and dt == torch.float16 and scaler is None:
+                                    try:
+                                        from torch.cuda.amp import GradScaler  # type: ignore
+
+                                        scaler = GradScaler()
+                                    except Exception:
+                                        scaler = None
+                                print(f"[selfopt][train] OOM @ step {opt_step} with bs=1; enabling AMP ({args.amp_dtype}) and retrying.")
+                                empty_device_cache(device)
+                                continue
+                        except Exception:
+                            pass
+
                         raise RuntimeError(
                             f"Out of memory at optimizer step {opt_step} even with batch_size=1 (seq_len={seq_len}). "
-                            "Reduce model size, reduce --train-seq-len/--block, or enable --grad-checkpoint/--amp."
+                            "Reduce model size or reduce sequence length (block/train-seq-len)."
                         ) from e
                     new_bs = max(1, int(micro_bs_try // 2))
                     prev = int(auto_bs_cap_by_seq.get(int(seq_len), 1 << 30))
                     auto_bs_cap_by_seq[int(seq_len)] = min(prev, int(new_bs))
-                    _empty_device_cache(device)
+                    empty_device_cache(device)
                     micro_bs_try = int(new_bs)
                     grad_accum_try = int(math.ceil(float(gbs_target) / max(1.0, float(micro_bs_try))))
                     print(
@@ -1292,7 +1682,8 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
             print(
                 f"step {opt_step}/{total_opt_steps} loss={ev['loss']:.4f} ppl={ev['ppl']:.2f} "
                 f"lr={lr:.3g} tok/s={tok_s:.0f} seq={seq_len} gbs={ev['gbs']} "
-                f"ms/step={ev['ms_step']:.0f}"
+                f"ms/step={ev['ms_step']:.0f}",
+                flush=True,
             )
             # reset interval accumulators
             dt_acc = 0.0
@@ -1307,15 +1698,15 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
             ev = {"type": "eval", "step": opt_step, "train_loss": tr_loss, "val_loss": va_loss}
             if logger is not None:
                 logger.log(ev)
-            print(f"[eval] step {opt_step}: train={tr_loss:.4f} val={va_loss:.4f}")
+            print(f"[eval] step {opt_step}: train={tr_loss:.4f} val={va_loss:.4f}", flush=True)
             if va_loss < best_val:
                 best_val = va_loss
                 torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "best.pt"))
 
         if int(args.save_every) > 0 and (opt_step % int(args.save_every) == 0):
-            torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "last.pt"))
+            torch.save(_make_full_ckpt(opt_step=opt_step), os.path.join(str(args.out_dir), "last.pt"))
 
-    torch.save({"model": model.state_dict(), "config": asdict(cfg)}, os.path.join(str(args.out_dir), "last.pt"))
+    torch.save(_make_full_ckpt(opt_step=last_step), os.path.join(str(args.out_dir), "last.pt"))
     if logger is not None:
         logger.finalize(best_val=best_val if best_val < float("inf") else float("nan"), last_step=last_step)
         logger.close()

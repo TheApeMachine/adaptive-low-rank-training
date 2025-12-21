@@ -18,6 +18,7 @@ from production.runtime_tuning import (
     KVDecodeSelfOptimizer,
     KVDecodePlan,
     KVSelfOptConfig,
+    estimate_decoupled_kvcache_bytes,
     load_token_ids_spec,
     policy_quality_reject_reasons,
     warn_policy_quality_reject,
@@ -131,6 +132,7 @@ class GPT(nn.Module):
         *,
         caches: Optional[List[Any]] = None,
         pos_offset: int = 0,
+        return_features: bool = False,
     ) -> Tuple[torch.Tensor, Optional[List[Any]]]:
         B, T = idx.shape
         if caches is None and T > self.cfg.block_size:
@@ -190,6 +192,8 @@ class GPT(nn.Module):
             x_small = self.emb_out(x)
         else:
             x_small = x
+        if return_features:
+            return x_small, new_caches
         logits = x_small @ self.tok_emb.weight.t()
         return logits, new_caches
 
@@ -492,6 +496,7 @@ class GPT(nn.Module):
         kv_fused: str,
         max_new_tokens: int,
         is_speculative: bool,
+        log_callback: Optional[Any] = None,
     ) -> Tuple[KVCacheTensorConfig, KVCacheTensorConfig, KVCacheTensorConfig, Optional[int], int]:
         """Shared cache-policy selection + optional quality validation for `generate` + `generate_speculative`.
 
@@ -514,6 +519,14 @@ class GPT(nn.Module):
             return k_sem_cfg, k_geo_cfg, v_dec_cfg, layerwise_promote_layers, kv_residual_out
 
         try:
+            def _emit(ev: dict) -> None:
+                if not log_callback:
+                    return
+                try:
+                    log_callback(ev)
+                except Exception:
+                    pass
+
             B, T0 = prompt.shape
             max_seq = int(T0 + int(max_new_tokens))
 
@@ -537,9 +550,17 @@ class GPT(nn.Module):
                 base_decode_block=int(kv_decode_block),
                 base_fused=str(kv_fused),
             )
-            chosen = pol_tuner.choose_policy(prompt_len=int(T0))
+            want_short = bool(getattr(self_opt, "policy_quality", False))
+            want_long = bool(want_short and getattr(self_opt, "policy_quality_long", False))
+            accept_mode: str = "unknown"
 
-            if getattr(self_opt, "policy_quality", False):
+            # If long-horizon gate is enabled, treat it as the primary acceptance criterion:
+            # test multiple global candidates first, then (optionally) try layerwise promotion as a last resort.
+            if want_short and want_long:
+                candidates = pol_tuner.shortlist_policies(prompt_len=int(T0), max_candidates=8)
+                chosen = base_policy
+                selected_ok = False
+
                 calib_spec = getattr(self_opt, "calib_tokens", None)
                 if calib_spec:
                     calib_ids = load_token_ids_spec(str(calib_spec))
@@ -547,97 +568,6 @@ class GPT(nn.Module):
                 else:
                     calib = prompt.detach()
 
-                compute_kl = bool(getattr(self_opt, "quality_compute_kl", False)) or (getattr(self_opt, "quality_kl_tol", None) is not None)
-                qm = self._policy_quality_metrics_decoupled(
-                    calib,
-                    policy=chosen,
-                    prefill=int(getattr(self_opt, "calib_prefill", 128)),
-                    decode_steps=int(getattr(self_opt, "calib_decode_steps", 32)),
-                    kv_decode_block=int(kv_decode_block),
-                    compute_kl=compute_kl,
-                )
-                reasons = policy_quality_reject_reasons(
-                    qm,
-                    max_abs_logit_tol=getattr(self_opt, "quality_tol", None),
-                    delta_nll_tol=getattr(self_opt, "quality_delta_nll_tol", None),
-                    ppl_ratio_tol=getattr(self_opt, "quality_ppl_ratio_tol", None),
-                    kl_tol=getattr(self_opt, "quality_kl_tol", None),
-                )
-                if reasons:
-                    if bool(getattr(self_opt, "layerwise_cache", False)) and model.cfg.n_layer > 1:
-                        low = chosen
-                        pre = int(getattr(self_opt, "calib_prefill", 128))
-                        dec = int(getattr(self_opt, "calib_decode_steps", 32))
-
-                        cand_ns: List[int] = []
-                        n = 1
-                        while n < int(model.cfg.n_layer):
-                            cand_ns.append(n)
-                            n *= 2
-                        cand_ns.append(int(model.cfg.n_layer))
-                        cand_ns = sorted(set(cand_ns))
-
-                        for n_promote in cand_ns:
-                            qm2 = self._policy_quality_metrics_decoupled_layerwise(
-                                calib,
-                                low_policy=low,
-                                promote_layers=n_promote,
-                                prefill=pre,
-                                decode_steps=dec,
-                                kv_decode_block=int(kv_decode_block),
-                                compute_kl=compute_kl,
-                            )
-                            reasons2 = policy_quality_reject_reasons(
-                                qm2,
-                                max_abs_logit_tol=getattr(self_opt, "quality_tol", None),
-                                delta_nll_tol=getattr(self_opt, "quality_delta_nll_tol", None),
-                                ppl_ratio_tol=getattr(self_opt, "quality_ppl_ratio_tol", None),
-                                kl_tol=getattr(self_opt, "quality_kl_tol", None),
-                            )
-                            if not reasons2:
-                                layerwise_promote_layers = int(n_promote)
-                                if is_speculative:
-                                    print(
-                                        f"[selfopt] layerwise cache-policy enabled for speculative decode: promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} low={low.short()}"
-                                    )
-                                else:
-                                    dnll = float(qm2.get("delta_nll", float("nan")))
-                                    pr = float(qm2.get("ppl_ratio", float("nan")))
-                                    klv = float(qm2.get("kl_base_cand", float("nan")))
-                                    mx = float(qm2.get("max_abs_logit", float("nan")))
-                                    print(
-                                        f"[selfopt] layerwise cache-policy OK: promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} "
-                                        f"low={low.short()} ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}"
-                                    )
-                                chosen = low
-                                break
-
-                        if layerwise_promote_layers is None:
-                            warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=reasons)
-                            chosen = base_policy
-                            # Persist the rejection so we don't repeatedly pick a known-bad cached policy.
-                            pol_tuner.update_cached_policy(base_policy)
-                    else:
-                        warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=reasons)
-                        chosen = base_policy
-                        pol_tuner.update_cached_policy(base_policy)
-                else:
-                    dnll = float(qm.get("delta_nll", float("nan")))
-                    pr = float(qm.get("ppl_ratio", float("nan")))
-                    klv = float(qm.get("kl_base_cand", float("nan")))
-                    mx = float(qm.get("max_abs_logit", float("nan")))
-                    if is_speculative:
-                        print(f"[selfopt] cache-policy quality OK (spec): ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
-                    else:
-                        print(f"[selfopt] cache-policy quality OK: ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
-
-            # Optional long-horizon quality gate (final acceptance check).
-            # Runs only after the short gate passes (or after a layerwise repair passes the short gate).
-            if (
-                chosen is not base_policy
-                and bool(getattr(self_opt, "policy_quality", False))
-                and bool(getattr(self_opt, "policy_quality_long", False))
-            ):
                 calib_long_spec = getattr(self_opt, "calib_long_tokens", None) or getattr(self_opt, "calib_tokens", None)
                 if calib_long_spec:
                     calib_long_ids = load_token_ids_spec(str(calib_long_spec))
@@ -645,29 +575,13 @@ class GPT(nn.Module):
                 else:
                     calib_long = prompt.detach()
 
+                compute_kl = bool(getattr(self_opt, "quality_compute_kl", False)) or (getattr(self_opt, "quality_kl_tol", None) is not None)
                 compute_kl_long = bool(getattr(self_opt, "quality_long_compute_kl", False)) or (getattr(self_opt, "quality_long_kl_tol", None) is not None)
+
+                pre = int(getattr(self_opt, "calib_prefill", 128))
+                dec = int(getattr(self_opt, "calib_decode_steps", 32))
                 pre_long = int(getattr(self_opt, "calib_long_prefill", 4096))
                 dec_long = int(getattr(self_opt, "calib_long_decode_steps", 128))
-
-                if layerwise_promote_layers is None:
-                    qm_long = self._policy_quality_metrics_decoupled(
-                        calib_long,
-                        policy=chosen,
-                        prefill=pre_long,
-                        decode_steps=dec_long,
-                        kv_decode_block=int(kv_decode_block),
-                        compute_kl=compute_kl_long,
-                    )
-                else:
-                    qm_long = self._policy_quality_metrics_decoupled_layerwise(
-                        calib_long,
-                        low_policy=chosen,
-                        promote_layers=int(layerwise_promote_layers),
-                        prefill=pre_long,
-                        decode_steps=dec_long,
-                        kv_decode_block=int(kv_decode_block),
-                        compute_kl=compute_kl_long,
-                    )
 
                 # Long gate tolerances fall back to short gate tolerances when unset.
                 long_max_tol = getattr(self_opt, "quality_long_tol", None)
@@ -683,18 +597,57 @@ class GPT(nn.Module):
                 if long_kl_tol is None:
                     long_kl_tol = getattr(self_opt, "quality_kl_tol", None)
 
-                reasons_long = policy_quality_reject_reasons(
-                    qm_long,
-                    max_abs_logit_tol=long_max_tol,
-                    delta_nll_tol=long_dnll_tol,
-                    ppl_ratio_tol=long_pr_tol,
-                    kl_tol=long_kl_tol,
-                )
+                long_fail: List[KVCachePolicy] = []
 
-                if reasons_long:
-                    # First try the existing repair path (promote early layers to fp16), but evaluated on the long gate.
-                    if bool(getattr(self_opt, "layerwise_cache", False)) and model.cfg.n_layer > 1 and layerwise_promote_layers is None:
-                        low = chosen
+                for cand in candidates:
+                    qm = self._policy_quality_metrics_decoupled(
+                        calib,
+                        policy=cand,
+                        prefill=pre,
+                        decode_steps=dec,
+                        kv_decode_block=int(kv_decode_block),
+                        compute_kl=compute_kl,
+                    )
+                    reasons = policy_quality_reject_reasons(
+                        qm,
+                        max_abs_logit_tol=getattr(self_opt, "quality_tol", None),
+                        delta_nll_tol=getattr(self_opt, "quality_delta_nll_tol", None),
+                        ppl_ratio_tol=getattr(self_opt, "quality_ppl_ratio_tol", None),
+                        kl_tol=getattr(self_opt, "quality_kl_tol", None),
+                    )
+                    if reasons:
+                        continue
+
+                    qm_long = self._policy_quality_metrics_decoupled(
+                        calib_long,
+                        policy=cand,
+                        prefill=pre_long,
+                        decode_steps=dec_long,
+                        kv_decode_block=int(kv_decode_block),
+                        compute_kl=compute_kl_long,
+                    )
+                    reasons_long = policy_quality_reject_reasons(
+                        qm_long,
+                        max_abs_logit_tol=long_max_tol,
+                        delta_nll_tol=long_dnll_tol,
+                        ppl_ratio_tol=long_pr_tol,
+                        kl_tol=long_kl_tol,
+                    )
+                    if not reasons_long:
+                        chosen = cand
+                        layerwise_promote_layers = None
+                        selected_ok = True
+                        dnll = float(qm_long.get("delta_nll", float("nan")))
+                        pr = float(qm_long.get("ppl_ratio", float("nan")))
+                        klv = float(qm_long.get("kl_base_cand", float("nan")))
+                        mx = float(qm_long.get("max_abs_logit", float("nan")))
+                        print(f"[selfopt] cache-policy long-horizon OK: {chosen.short()} ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
+                        break
+                    long_fail.append(cand)
+
+                if not selected_ok:
+                    # Exhausted global candidates; only now consider layerwise promotion under the long gate.
+                    if bool(getattr(self_opt, "layerwise_cache", False)) and model.cfg.n_layer > 1 and long_fail:
                         cand_ns: List[int] = []
                         n = 1
                         while n < int(model.cfg.n_layer):
@@ -703,52 +656,198 @@ class GPT(nn.Module):
                         cand_ns.append(int(model.cfg.n_layer))
                         cand_ns = sorted(set(cand_ns))
 
-                        for n_promote in cand_ns:
-                            qm2 = self._policy_quality_metrics_decoupled_layerwise(
-                                calib_long,
-                                low_policy=low,
-                                promote_layers=n_promote,
-                                prefill=pre_long,
-                                decode_steps=dec_long,
-                                kv_decode_block=int(kv_decode_block),
-                                compute_kl=compute_kl_long,
-                            )
-                            reasons2 = policy_quality_reject_reasons(
-                                qm2,
-                                max_abs_logit_tol=long_max_tol,
-                                delta_nll_tol=long_dnll_tol,
-                                ppl_ratio_tol=long_pr_tol,
-                                kl_tol=long_kl_tol,
-                            )
-                            if not reasons2:
-                                layerwise_promote_layers = int(n_promote)
-                                dnll = float(qm2.get("delta_nll", float("nan")))
-                                pr = float(qm2.get("ppl_ratio", float("nan")))
-                                klv = float(qm2.get("kl_base_cand", float("nan")))
-                                mx = float(qm2.get("max_abs_logit", float("nan")))
-                                print(
-                                    f"[selfopt] long-horizon layerwise cache-policy OK: promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} "
-                                    f"low={low.short()} ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}"
+                        for low in long_fail:
+                            for n_promote in cand_ns:
+                                qm2 = self._policy_quality_metrics_decoupled_layerwise(
+                                    calib_long,
+                                    low_policy=low,
+                                    promote_layers=n_promote,
+                                    prefill=pre_long,
+                                    decode_steps=dec_long,
+                                    kv_decode_block=int(kv_decode_block),
+                                    compute_kl=compute_kl_long,
                                 )
-                                chosen = low
+                                reasons2 = policy_quality_reject_reasons(
+                                    qm2,
+                                    max_abs_logit_tol=long_max_tol,
+                                    delta_nll_tol=long_dnll_tol,
+                                    ppl_ratio_tol=long_pr_tol,
+                                    kl_tol=long_kl_tol,
+                                )
+                                if not reasons2:
+                                    layerwise_promote_layers = int(n_promote)
+                                    chosen = low
+                                    selected_ok = True
+                                    dnll = float(qm2.get("delta_nll", float("nan")))
+                                    pr = float(qm2.get("ppl_ratio", float("nan")))
+                                    klv = float(qm2.get("kl_base_cand", float("nan")))
+                                    mx = float(qm2.get("max_abs_logit", float("nan")))
+                                    print(
+                                        f"[selfopt] cache-policy long-horizon OK (layerwise): promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} "
+                                        f"low={low.short()} ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}"
+                                    )
+                                    break
+                            if selected_ok:
                                 break
 
-                    if layerwise_promote_layers is None:
-                        warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=reasons_long)
+                    if not selected_ok:
+                        # Persist base policy to avoid repeatedly selecting known-bad cached policies.
+                        warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=["no_global_policy_passed_long_gate"])
                         chosen = base_policy
-                        pol_tuner.update_cached_policy(base_policy)
+
+                # Persist the accepted choice (even if it's the base policy) for stability across runs.
+                pol_tuner.update_cached_policy(chosen)
+                if layerwise_promote_layers is not None:
+                    accept_mode = "long_gate_layerwise"
+                elif selected_ok:
+                    accept_mode = "long_gate_global"
                 else:
-                    dnll = float(qm_long.get("delta_nll", float("nan")))
-                    pr = float(qm_long.get("ppl_ratio", float("nan")))
-                    klv = float(qm_long.get("kl_base_cand", float("nan")))
-                    mx = float(qm_long.get("max_abs_logit", float("nan")))
-                    if layerwise_promote_layers is not None:
-                        print(f"[selfopt] cache-policy long-horizon OK (layerwise): ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
+                    accept_mode = "long_gate_fallback"
+
+            else:
+                chosen = pol_tuner.choose_policy(prompt_len=int(T0))
+                accept_mode = "short_gate" if want_short else "microbench_only"
+
+                if want_short:
+                    calib_spec = getattr(self_opt, "calib_tokens", None)
+                    if calib_spec:
+                        calib_ids = load_token_ids_spec(str(calib_spec))
+                        calib = torch.tensor([calib_ids], device=device, dtype=torch.long)
                     else:
-                        print(f"[selfopt] cache-policy long-horizon OK: ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
+                        calib = prompt.detach()
+
+                    compute_kl = bool(getattr(self_opt, "quality_compute_kl", False)) or (getattr(self_opt, "quality_kl_tol", None) is not None)
+                    qm = self._policy_quality_metrics_decoupled(
+                        calib,
+                        policy=chosen,
+                        prefill=int(getattr(self_opt, "calib_prefill", 128)),
+                        decode_steps=int(getattr(self_opt, "calib_decode_steps", 32)),
+                        kv_decode_block=int(kv_decode_block),
+                        compute_kl=compute_kl,
+                    )
+                    reasons = policy_quality_reject_reasons(
+                        qm,
+                        max_abs_logit_tol=getattr(self_opt, "quality_tol", None),
+                        delta_nll_tol=getattr(self_opt, "quality_delta_nll_tol", None),
+                        ppl_ratio_tol=getattr(self_opt, "quality_ppl_ratio_tol", None),
+                        kl_tol=getattr(self_opt, "quality_kl_tol", None),
+                    )
+                    if reasons:
+                        if bool(getattr(self_opt, "layerwise_cache", False)) and model.cfg.n_layer > 1:
+                            low = chosen
+                            pre = int(getattr(self_opt, "calib_prefill", 128))
+                            dec = int(getattr(self_opt, "calib_decode_steps", 32))
+
+                            cand_ns: List[int] = []
+                            n = 1
+                            while n < int(model.cfg.n_layer):
+                                cand_ns.append(n)
+                                n *= 2
+                            cand_ns.append(int(model.cfg.n_layer))
+                            cand_ns = sorted(set(cand_ns))
+
+                            for n_promote in cand_ns:
+                                qm2 = self._policy_quality_metrics_decoupled_layerwise(
+                                    calib,
+                                    low_policy=low,
+                                    promote_layers=n_promote,
+                                    prefill=pre,
+                                    decode_steps=dec,
+                                    kv_decode_block=int(kv_decode_block),
+                                    compute_kl=compute_kl,
+                                )
+                                reasons2 = policy_quality_reject_reasons(
+                                    qm2,
+                                    max_abs_logit_tol=getattr(self_opt, "quality_tol", None),
+                                    delta_nll_tol=getattr(self_opt, "quality_delta_nll_tol", None),
+                                    ppl_ratio_tol=getattr(self_opt, "quality_ppl_ratio_tol", None),
+                                    kl_tol=getattr(self_opt, "quality_kl_tol", None),
+                                )
+                                if not reasons2:
+                                    layerwise_promote_layers = int(n_promote)
+                                    if is_speculative:
+                                        print(
+                                            f"[selfopt] layerwise cache-policy enabled for speculative decode: promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} low={low.short()}"
+                                        )
+                                    else:
+                                        dnll = float(qm2.get("delta_nll", float("nan")))
+                                        pr = float(qm2.get("ppl_ratio", float("nan")))
+                                        klv = float(qm2.get("kl_base_cand", float("nan")))
+                                        mx = float(qm2.get("max_abs_logit", float("nan")))
+                                        print(
+                                            f"[selfopt] layerwise cache-policy OK: promote_layers={layerwise_promote_layers}/{model.cfg.n_layer} "
+                                            f"low={low.short()} ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}"
+                                        )
+                                    chosen = low
+                                    break
+
+                            if layerwise_promote_layers is None:
+                                warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=reasons)
+                                chosen = base_policy
+                                # Persist the rejection so we don't repeatedly pick a known-bad cached policy.
+                                pol_tuner.update_cached_policy(base_policy)
+                        else:
+                            warn_policy_quality_reject(chosen=chosen.short(), fallback=base_policy.short(), reasons=reasons)
+                            chosen = base_policy
+                            pol_tuner.update_cached_policy(base_policy)
+                    else:
+                        dnll = float(qm.get("delta_nll", float("nan")))
+                        pr = float(qm.get("ppl_ratio", float("nan")))
+                        klv = float(qm.get("kl_base_cand", float("nan")))
+                        mx = float(qm.get("max_abs_logit", float("nan")))
+                        if is_speculative:
+                            print(f"[selfopt] cache-policy quality OK (spec): ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
+                        else:
+                            print(f"[selfopt] cache-policy quality OK: ΔNLL={dnll:.4g} ppl_ratio={pr:.4g} KL={klv:.4g} max|Δlogit|={mx:.4g}")
 
             k_sem_cfg2, k_geo_cfg2, v_dec_cfg2 = chosen.to_tensor_cfgs()
             kv_residual_out = int(chosen.residual_len)
+
+            # Structured breadcrumb for reproducibility/auditing (JSONL + optional W&B numeric fields).
+            try:
+                base_b = int(
+                    estimate_decoupled_kvcache_bytes(
+                        n_layer=int(model.cfg.n_layer),
+                        batch_size=int(B),
+                        max_seq_len=int(max_seq),
+                        sem_dim=int(model.cfg.sem_dim),
+                        geo_dim=int(model.cfg.geo_dim),
+                        v_dim=int(model.cfg.attn_dim),
+                        policy=base_policy,
+                    )
+                )
+                chosen_b = int(
+                    estimate_decoupled_kvcache_bytes(
+                        n_layer=int(model.cfg.n_layer),
+                        batch_size=int(B),
+                        max_seq_len=int(max_seq),
+                        sem_dim=int(model.cfg.sem_dim),
+                        geo_dim=int(model.cfg.geo_dim),
+                        v_dim=int(model.cfg.attn_dim),
+                        policy=chosen,
+                    )
+                )
+            except Exception:
+                base_b = -1
+                chosen_b = -1
+
+            _emit(
+                {
+                    "type": "analysis",
+                    "subtype": "selfopt_cache_policy",
+                    "prompt_len": int(T0),
+                    "max_seq_len": int(max_seq),
+                    "accept_mode": str(accept_mode),
+                    "want_short": int(bool(want_short)),
+                    "want_long": int(bool(want_long)),
+                    "base_policy": base_policy.short(),
+                    "chosen_policy": chosen.short(),
+                    "layerwise_promote_layers": (0 if layerwise_promote_layers is None else int(layerwise_promote_layers)),
+                    "base_mem_bytes": int(base_b),
+                    "chosen_mem_bytes": int(chosen_b),
+                }
+            )
+
             return k_sem_cfg2, k_geo_cfg2, v_dec_cfg2, layerwise_promote_layers, kv_residual_out
         except Exception:
             return k_sem_cfg, k_geo_cfg, v_dec_cfg, layerwise_promote_layers, kv_residual_out
@@ -827,6 +926,7 @@ class GPT(nn.Module):
                 kv_fused=str(kv_fused),
                 max_new_tokens=int(max_new_tokens),
                 is_speculative=False,
+                log_callback=log_callback,
             )
 
         if self.cfg.attn_mode == "decoupled":
@@ -865,12 +965,21 @@ class GPT(nn.Module):
                         )
                     )
         else:
+            def _kv_dim_for(cfg: ModelConfig) -> int:
+                if str(cfg.attn_mode) == "standard":
+                    return int(cfg.d_model)
+                if str(cfg.attn_mode) == "gqa":
+                    kv_head = int(cfg.kv_head) if cfg.kv_head is not None else int(cfg.n_head)
+                    head_dim = int(cfg.attn_dim) // int(cfg.n_head)
+                    return int(kv_head * head_dim)
+                return int(cfg.attn_dim)
+
             caches = [
                 LayerKVCache(
                     batch_size=B,
                     max_seq_len=max_seq,
-                    k_dim=(self.cfg.d_model if self.cfg.attn_mode == "standard" else self.cfg.attn_dim),
-                    v_dim=(self.cfg.d_model if self.cfg.attn_mode == "standard" else self.cfg.attn_dim),
+                    k_dim=_kv_dim_for(self.cfg),
+                    v_dim=_kv_dim_for(self.cfg),
                     k_cfg=k_cfg,
                     v_cfg=v_cfg,
                     device=device,
@@ -1117,6 +1226,7 @@ class GPT(nn.Module):
                             kv_fused=str(kv_fused),
                             max_new_tokens=int(max_new_tokens),
                             is_speculative=True,
+                            log_callback=log_callback,
                         )
 
                 return max_seq, k_cfg, v_cfg, k_sem_cfg, k_geo_cfg, v_dec_cfg, layerwise_promote_layers
@@ -1159,12 +1269,21 @@ class GPT(nn.Module):
                                 )
                             )
                 else:
+                    def _kv_dim_for(cfg: ModelConfig) -> int:
+                        if str(cfg.attn_mode) == "standard":
+                            return int(cfg.d_model)
+                        if str(cfg.attn_mode) == "gqa":
+                            kv_head = int(cfg.kv_head) if cfg.kv_head is not None else int(cfg.n_head)
+                            head_dim = int(cfg.attn_dim) // int(cfg.n_head)
+                            return int(kv_head * head_dim)
+                        return int(cfg.attn_dim)
+
                     caches = [
                         LayerKVCache(
                             batch_size=int(B),
                             max_seq_len=int(max_seq),
-                            k_dim=(model.cfg.d_model if model.cfg.attn_mode == "standard" else model.cfg.attn_dim),
-                            v_dim=(model.cfg.d_model if model.cfg.attn_mode == "standard" else model.cfg.attn_dim),
+                            k_dim=_kv_dim_for(model.cfg),
+                            v_dim=_kv_dim_for(model.cfg),
                             k_cfg=k_cfg,
                             v_cfg=v_cfg,
                             device=device,

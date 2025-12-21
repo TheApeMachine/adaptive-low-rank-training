@@ -7,270 +7,149 @@
 
 ---
 
-## 🎯 TL;DR
+## TL;DR
 
-Transformer attention is **5× over-parameterized**. We reduce attention dimension from 512 to 96 and achieve **better perplexity** while enabling **168× KV-cache compression**.
+This repo contains the **production implementation** and **paper reproduction harness** for *Decoupled Bottleneck Attention*.
 
-| Model              | Attn Dim | Val Loss | Memory (128k ctx) |
-|:-------------------|:--------:|:--------:|:-----------------:|
-| Standard Baseline  | 512      | 5.37     | 64 GB             |
-| **Bottleneck 96**  | 96       | **5.33** | 1.5 GB            |
-| **Decoupled + Q4** | 32+64    | 5.59     | **0.38 GB**       |
+- **Single source of truth**: `production/` (invoked via `main.py`)
+- **Single dataset**: **FineWeb-Edu GPT-2 tokens** (`fineweb_100m.npy`, `fineweb_20b.npy`)
+- **Single reproduction entrypoint**: `paper_manifest.json` + `run_paper_manifest.py`
+
+Paper numbers and plots are generated from run artifacts into `assets/paper_results.json` by `generate_paper_figures.py`.
 
 **Key Insight:** *Attention is a router, not a processor.* Semantic routing operates in ~32 dimensions; positional geometry needs ~64. By decoupling them, we slash memory while preserving quality.
 
 ---
 
-## 📊 Key Results
+## Key Results (how we measure)
 
-### The "Bottleneck Beats Baseline" Finding
-
-Surprisingly, constraining attention to 96 dimensions **outperforms** full-rank 512-dim attention:
-
-![Convergence Plot](assets/convergence_plot.png)
-
-### Memory Footprint at 128k Context (Llama-7B Scale)
-
-![Memory Footprint](assets/memory_footprint.png)
+- **Training/eval metrics**: written to `runs/<id>/train.jsonl` by the production runner.
+- **KV-cache @128k memory**: written to `runs/<id>/mem128k.json` by `production/bench_end_to_end_memory.py`.
+  - For decoupled runs we also report the paper decomposition:
+    - **architecture-only**: standard FP16 → decoupled FP16
+    - **quant-only**: decoupled FP16 → hetero Q4/Q8/Q4
+    - **end-to-end**: standard FP16 → hetero Q4/Q8/Q4
+- **Paper artifacts**: `generate_paper_figures.py` produces:
+  - `assets/paper_results.json`
+  - `assets/fig_convergence.png`
+  - `assets/fig_pareto_memory_vs_loss.png`
+  - `assets/table_main.tex`, `assets/table_scale.tex`
 
 ---
 
-## 🚀 Quick Start
+## Quick Start (reviewer reproduction)
 
 ### Prerequisites
 
-```bash
-# Python 3.10+ required
-pip install torch numpy matplotlib seaborn tqdm
-
-# Or use the Makefile:
-make install_deps
-```
-
-### Train a ~1B model on a rented GPU / Colab (CUDA)
-
-If you want the *easiest possible* kick-off for a single-GPU ~1B run, use the helper launcher:
+You need Python 3.10+ and PyTorch for either CUDA or MPS.
 
 ```bash
-# Install deps without touching your CUDA-enabled torch install:
-python3.12 -m pip install -r requirements_runtime.txt
-
-# (Optional) prepare data
-python3.12 prepare_fineweb.py --tokens 1B --output fineweb_1b.npy
-
-# Dry-run (prints the full v29 command):
-python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy
-
-# Actually run:
-python3.12 run_1b_launch.py --device cuda --data fineweb_1b.npy --run
+python -m pip install -r requirements.txt
 ```
 
-More details + Colab notes are in `docs/LAUNCH_1B.md`.
+Notes:
+- On CUDA machines, install a CUDA-enabled torch separately (do not `pip install torch` over it).
+- `matplotlib` is optional unless you want to generate plots.
 
-### Setup
+### Dataset files (FineWeb-Edu tokens)
+
+The harness expects tokenized arrays:
+- `fineweb_100m.npy` (local suite)
+- `fineweb_20b.npy` (A100 scale suite)
+
+If you don’t have them, generate them with:
 
 ```bash
-# Prepare WikiText-2 dataset (auto-downloads if needed)
-make setup
+python prepare_fineweb.py --tokens 100M --output fineweb_100m.npy
 ```
 
-### One-Command Replication
+Note: the A100 suite expects `fineweb_20b.npy`. If you already have a prebuilt 20B-token shard on your A100 instance,
+copy it into the repo root under that exact filename.
 
-To reproduce **all experiments from the paper**:
+### One-command reproduction (manifest-driven)
+
+All paper runs are defined in `paper_manifest.json`. The harness:
+- validates resolved configs (no flag ambiguity),
+- writes per-run provenance (`command.txt`, `resolved_config.json`, `resolved_run.json`),
+- runs training,
+- optionally runs `mem128k.json` benchmarking after training.
+
+#### 1) Validate configs (no training)
 
 ```bash
-make replicate_paper
+python run_paper_manifest.py --group mac_fw100m --dry-run
+python run_paper_manifest.py --group a100_fw1b_1bscale --dry-run
 ```
 
-This automatically:
+#### 2) Run the Mac suite (FineWeb 100M)
 
-1. Runs `setup` to prepare WikiText-2
-2. Runs WikiText-2 core experiments
-3. Runs ablation studies
-4. **Downloads and prepares FineWeb-Edu (~448MB)** if not present
-5. Runs FineWeb validation experiments
-6. Generates all figures
+```bash
+python run_paper_manifest.py --group mac_fw100m --post-mem128k
+```
 
-This runs the full experimental suite (~8-12 hours on M1/M2 Mac or CUDA GPU):
+#### 3) Run the A100 suite (FineWeb 20B tokens)
 
-1. WikiText-2 baseline and ablations
-2. GQA comparison
-3. Long-context stress tests
-4. FineWeb-Edu validation (if `fineweb_100m.tokens` exists)
+```bash
+python run_paper_manifest.py --group a100_fw1b_1bscale --post-mem128k
+```
+
+The A100 runs are **resumable**. Re-running the same command will resume from `runs/<id>/last.pt` if present.
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
-decoupled-bottleneck-attention/
-├── v19_transformer_attn_bottleneck.py          # Tech report training script
-├── v21_transformer_decoupled_bottleneck.py     # Main training script
-├── v21_transformer_decoupled_bottleneck_gqa.py # Main training script
-├── v22_decoupled_bottleneck_survive_scale.py   # Production grade/Datacenter version
-├── bottleneck_attention_tech_report.pdf        # Tech report on preceeding research/results
-├── decoupled_bottleneck_attention.pdf          # PDF paper
-├── paper.tex                                   # LaTeX paper source
+experiments/
+├── production/                                 # Canonical implementation (single source of truth)
+├── main.py                                     # Canonical CLI entrypoint (calls production/cli.py)
+├── paper_manifest.json                         # Canonical paper run manifest
+├── run_paper_manifest.py                       # Canonical paper harness runner
+├── generate_paper_figures.py                   # Generates assets/ paper artifacts from run dirs
+├── paper.tex                                   # Paper source (inputs assets/table_*.tex, assets/*.png)
 ├── references.bib                              # Bibliography
-├── Makefile                                    # Experiment commands
-├── plot_memory.py                              # Memory visualization
-├── plot_results.py                             # Result graphs
-├── vis_heatmap.py                              # Attention heatmaps
-├── experiments/                                # Every historical version of the code from beginning to now
+├── Makefile                                    # Misc helpers (not used for paper reproduction)
+├── experiments/                                # Historical experiments (not paper-canonical)
 ├── runs/                                       # Training logs (and checkpoints once run locally)
 ├── assets/                                     # Generated figures
-│   ├── convergence_plot.png
-│   ├── memory_footprint.png
-│   └── pareto_curve.png
-│   └── ...
+│   ├── paper_results.json
+│   ├── fig_convergence.png
+│   ├── fig_pareto_memory_vs_loss.png
+│   ├── table_main.tex
+│   └── table_scale.tex
 └── docs/
     └── RESEARCH_MASTER_PLAN.md
 ```
 
 ---
 
-## 🧪 Experiment Guide
+## Paper experiment contract (what reviewers should check)
 
-### Core Experiments (WikiText-2)
+For any run id in `paper_manifest.json`, reviewers should be able to verify:
 
-#### 1. Combined Bottleneck 96 (Best Perplexity)
-
-```bash
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_combined_baseline_96 \
-    --attn-mode bottleneck \
-    --attn-dim 96 \
-    --null-attn
-```
-
-#### 2. Decoupled Bottleneck (Semantic 32 + Geometric 64)
-
-```bash
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_decoupled_sem32_geo64 \
-    --attn-mode decoupled \
-    --sem-dim 32 \
-    --geo-dim 64 \
-    --attn-dim 128 \
-    --embed-dim 512 \
-    --tie-qk \
-    --null-attn
-```
-
-#### 3. Standard Baseline (Full Rank 512)
-
-```bash
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_baseline \
-    --attn-mode standard \
-    --d-model 512
-```
-
-### Ablation Studies
-
-#### GQA Comparison (8 Query / 2 KV Heads)
-
-```bash
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_gqa_kv2_parammatch \
-    --attn-mode gqa \
-    --kv-head 2 \
-    --d-model 512 \
-    --attn-dim 128 \
-    --null-attn \
-    --batch-size 64
-```
-
-#### Small Model Control (d_model=128)
-
-Proves the "wide residual stream" hypothesis—you can't just shrink everything:
-
-```bash
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_small_d128_standard \
-    --attn-mode standard \
-    --d-model 128 \
-    --layers 6 \
-    --n-head 4 \
-    --d-ff 512 \
-    --embed-dim 128 \
-    --null-attn \
-    --batch-size 64
-```
-
-#### Long Context Stress Tests
-
-```bash
-# 1024 context
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_decoupled_block1024 \
-    --attn-mode decoupled \
-    --sem-dim 32 --geo-dim 64 \
-    --block 1024 \
-    --batch-size 8 \
-    --steps 1200
-
-# 2048 context
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data wiki.train.tokens \
-    --out-dir runs/v21_decoupled_block2048 \
-    --attn-mode decoupled \
-    --sem-dim 32 --geo-dim 64 \
-    --block 2048 \
-    --batch-size 4 \
-    --steps 800
-```
-
-### FineWeb-Edu (Large Scale Validation)
-
-```bash
-# Step 1: Prepare dataset (downloads ~2GB)
-python3 prepare_fineweb.py --out fineweb_100m.tokens
-
-# Step 2: Run baseline
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data fineweb_100m.tokens \
-    --out-dir runs/v21_fineweb_baseline \
-    --attn-mode standard \
-    --d-model 512 \
-    --block 1024 \
-    --batch-size 16 \
-    --steps 6000
-
-# Step 3: Run decoupled
-python3 v21_transformer_decoupled_bottleneck_gqa.py \
-    --data fineweb_100m.tokens \
-    --out-dir runs/v21_fineweb_decoupled \
-    --attn-mode decoupled \
-    --sem-dim 32 --geo-dim 64 \
-    --block 1024 \
-    --batch-size 16 \
-    --tie-qk --null-attn \
-    --steps 6000
-```
+- **Provenance**
+  - `runs/<id>/command.txt` matches what was executed
+  - `runs/<id>/resolved_config.json` contains the fully resolved config used
+  - `runs/<id>/train.jsonl` contains `meta`/`resume_meta`, `train`, `eval`, `done` events
+- **Memory measurement**
+  - `runs/<id>/mem128k.json` exists (when using `--post-mem128k`)
+  - decoupled runs include `decomposition.estimate_bytes` and `decomposition.measured`
 
 ---
 
-## 📈 Generate Figures
+## Generate paper figures / tables
 
 After running experiments:
 
 ```bash
-# Convergence curves
-python3 plot_results.py
-
-# Memory footprint chart
-python3 plot_memory.py
-
-# Attention heatmaps (requires checkpoint)
-python3 vis_heatmap.py --ckpt runs/v21_combined_baseline_96/best.pt
+python generate_paper_figures.py
 ```
+
+This writes:
+- `assets/paper_results.json`
+- `assets/fig_convergence.png`
+- `assets/fig_pareto_memory_vs_loss.png`
+- `assets/table_main.tex`, `assets/table_scale.tex`
 
 ---
 
@@ -281,46 +160,25 @@ This project now defaults to a **minimal, self-optimizing CLI**: you specify *in
 ### Train (example)
 
 ```bash
-python3 main.py --mode train --size 1b --exp train_decoupled_fast --data wiki.train.tokens --wandb
+python3 main.py --mode train --size medium --exp paper_decoupled --data fineweb_100m.npy --wandb
 ```
 
 ### Sample (example)
 
 ```bash
-python3 main.py --mode sample --ckpt runs/1b_train_decoupled_fast/ckpt.pt --prompt-tokens "0 1 2 3" --max-new-tokens 64 --tb
-```
-
-### Expert escape hatch
-
-To access legacy/advanced flags (optimization knobs, kv-cache overrides, etc.), pass `--expert`.
-
-```bash
-python3 main.py --expert --mode sample --ckpt runs/1b_train_decoupled_fast/ckpt.pt --kv-policy "ksem=q4_0@32,kgeo=q8_0@32,v=q4_0@32,resid=128"
+python3 main.py --mode sample --ckpt runs/<run_id>/best.pt --prompt-tokens "0 1 2 3" --max-new-tokens 64
 ```
 
 ### Debug/repro
 
-Disable all self-optimization with:
+Optimization behavior is fully self-driven; there are no environment-variable toggles for disabling core optimization paths.
 
-```bash
-python3 main.py --no-selfopt ...
-```
+## Model Configuration
 
-## 🔧 Model Configuration
+Model/training recipes are defined via presets and manifests:
 
-| Argument      | Default    | Description                                  |
-|:--------------|:-----------|:---------------------------------------------|
-| `--attn-mode` | `standard` | `standard`, `bottleneck`, `decoupled`, `gqa` |
-| `--d-model`   | `512`      | Residual stream width                        |
-| `--attn-dim`  | `512`      | Attention bottleneck dimension               |
-| `--sem-dim`   | `32`       | Semantic path dimension (decoupled mode)     |
-| `--geo-dim`   | `64`       | Geometric path dimension (decoupled mode)    |
-| `--null-attn` | `False`    | Enable learnable null token                  |
-| `--tie-qk`    | `False`    | Tie Q and K projections (semantic path)      |
-| `--kv-head`   | `None`     | KV heads for GQA mode                        |
-| `--block`     | `256`      | Context length                               |
-| `--layers`    | `6`        | Number of transformer layers                 |
-| `--n-head`    | `8`        | Number of attention heads                    |
+- Presets: `production/config.py`
+- Paper harness: `run_paper_manifest.py` + `paper_manifest.json`
 
 ### Decoupled KV cache: semantic vs geometric precision (why k_geo is usually higher precision)
 

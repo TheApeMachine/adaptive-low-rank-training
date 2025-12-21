@@ -1,0 +1,94 @@
+{
+  "batch_size": 1,
+  "ckpt": "runs/step15000.pt",
+  "context_len": 131072,
+  "device": "mps",
+  "estimate_bytes": {
+    "baseline_fp16": 4429185024,
+    "candidate": 1619132416,
+    "ratio_baseline_over_candidate": 2.7355298308103295
+  },
+  "kv_decode_block": 1024,
+  "kv_fused": "auto",
+  "measured": {
+    "baseline_fp16": {
+      "after": {
+        "mps_mem_alloc_bytes": 8163533312.0,
+        "mps_mem_driver_bytes": 8657518592.0
+      },
+      "before": {
+        "mps_mem_alloc_bytes": 3734348288.0,
+        "mps_mem_driver_bytes": 4362551296.0
+      },
+      "delta": {
+        "mps_mem_alloc_bytes": 4429185024.0,
+        "mps_mem_driver_bytes": 4294967296.0
+      }
+    },
+    "candidate": {
+      "after": {
+        "mps_mem_alloc_bytes": 5353480704.0,
+        "mps_mem_driver_bytes": 5444681728.0
+      },
+      "before": {
+        "mps_mem_alloc_bytes": 3734348288.0,
+        "mps_mem_driver_bytes": 4362551296.0
+      },
+      "delta": {
+        "mps_mem_alloc_bytes": 1619132416.0,
+        "mps_mem_driver_bytes": 1082130432.0
+      }
+    },
+    "primary_key": "mps_mem_driver_bytes",
+    "ratio_baseline_over_candidate": 3.9689922480620154
+  },
+  "model_cfg": {
+    "attn_dim": 384,
+    "attn_mode": "decoupled",
+    "block_size": 131072,
+    "d_ff": 5632,
+    "d_model": 2048,
+    "decoupled_gate": true,
+    "dropout": 0.0,
+    "embed_dim": 2048,
+    "geo_dim": 256,
+    "kv_head": null,
+    "learned_temp": true,
+    "mlp": "swiglu",
+    "n_head": 32,
+    "n_layer": 22,
+    "null_attn": false,
+    "rope": true,
+    "rope_base": 10000.0,
+    "sem_dim": 128,
+    "tie_qk": false,
+    "vocab_size": 50257
+  },
+  "platform": {
+    "os": "macOS-15.6-arm64-arm-64bit",
+    "python": "3.12.12",
+    "torch": "2.9.1"
+  },
+  "policies": {
+    "baseline_fp16": {
+      "k_geo_kind": "fp16",
+      "k_geo_qblock": 32,
+      "k_sem_kind": "fp16",
+      "k_sem_qblock": 32,
+      "residual_len": 0,
+      "v_kind": "fp16",
+      "v_qblock": 32
+    },
+    "candidate": {
+      "k_geo_kind": "q8_0",
+      "k_geo_qblock": 32,
+      "k_sem_kind": "q4_0",
+      "k_sem_qblock": 32,
+      "residual_len": 128,
+      "v_kind": "q4_0",
+      "v_qblock": 32
+    }
+  },
+  "tokens_preview": null,
+  "ts": "2025-12-20T15:39:46+01:00"
+}

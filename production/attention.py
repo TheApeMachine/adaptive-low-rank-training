@@ -1283,7 +1283,9 @@ class DecoupledBottleneckAttention(nn.Module):
                     k_null = self._shape(self.k_null.expand(B, 1, -1), self.qk_head_dim, H=self.H_kv)
                     v_null = self._shape(self.v_null.expand(B, 1, -1), self.v_head_dim, H=self.H_kv)
                     s = (qg * k_null.to(compute_dtype).unsqueeze(2)).sum(dim=-1, keepdim=True).to(torch.float32) * (1.0 / math.sqrt(self.qk_head_dim))
-                    update(s.view(B, self.H, 1, 1), v_null.to(compute_dtype).unsqueeze(2).view(B, self.H, 1, self.v_head_dim))
+                    # v_null is stored per KV-head; repeat to match per-query-head scores.
+                    v_null_rep = v_null.repeat_interleave(self.group_size, dim=1).to(compute_dtype)  # (B, H, 1, hd)
+                    update(s.view(B, self.H, 1, 1), v_null_rep)
 
                 blk = int(max(1, decode_block))
                 for start in range(0, L, blk):
@@ -1293,7 +1295,9 @@ class DecoupledBottleneckAttention(nn.Module):
                     kbh = self._shape(k_blk, self.qk_head_dim, H=self.H_kv)
                     vbh = self._shape(v_blk, self.v_head_dim, H=self.H_kv)
                     s = torch.matmul(qg, kbh.unsqueeze(2).transpose(-2, -1)) * (1.0 / math.sqrt(self.qk_head_dim))
-                    update(s.view(B, self.H, 1, -1).to(torch.float32), vbh)
+                    # Scores are per-query-head (H); values are per-KV-head (H_kv). Repeat values across group_size.
+                    vbh_rep = vbh.repeat_interleave(self.group_size, dim=1)  # (B, H, blk, hd)
+                    update(s.view(B, self.H, 1, -1).to(torch.float32), vbh_rep)
 
                 out = o / d.clamp(min=1e-9).unsqueeze(-1)
                 y = self.out_proj(self._merge(out.to(qh.dtype)))
@@ -1481,6 +1485,10 @@ class DecoupledBottleneckAttention(nn.Module):
                 return y, None
 
             # Null-attn path (manual).
+            # Note: This feature is intentionally optional and is not part of the default decoupled
+            # production/paper preset. It adds complexity in the hottest forward path and disables
+            # some fused decode fast-paths; prefer keeping it off unless an explicit ablation shows
+            # it is required for a particular regime. See `production/ablate_null_attn.py`.
             scores = _decoupled_scores_f32(q_sem=qsh, q_geo=qgh, k_sem=ksh, k_geo=kgh, sem_scale=sem_scale, geo_scale=geo_scale)
 
             if attn_mask is not None:

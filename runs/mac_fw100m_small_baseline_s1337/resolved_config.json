@@ -1,0 +1,22 @@
+{
+  "attn_dim": 512,
+  "attn_mode": "standard",
+  "block_size": 1024,
+  "d_ff": 3072,
+  "d_model": 768,
+  "decoupled_gate": true,
+  "dropout": 0.0,
+  "embed_dim": 768,
+  "geo_dim": 64,
+  "kv_head": null,
+  "learned_temp": true,
+  "mlp": "swiglu",
+  "n_head": 12,
+  "n_layer": 12,
+  "null_attn": false,
+  "rope": true,
+  "rope_base": 10000.0,
+  "sem_dim": 32,
+  "tie_qk": false,
+  "vocab_size": 50257
+}

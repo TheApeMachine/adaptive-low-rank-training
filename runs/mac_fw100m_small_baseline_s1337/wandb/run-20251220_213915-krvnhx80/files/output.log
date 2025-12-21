@@ -1,0 +1,28 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/production/runs/krvnhx80
+step 1/50000 loss=10.9797 ppl=58669.44 lr=0.0003 tok/s=5643 seq=1024 gbs=8 ms/step=1452
+[warn] non-finite loss detected @ step 2; skipping step and reducing lr_mult -> 0.5
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50190] yb[min,max]=[0,50190] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step2_micro0.pt
+[warn] non-finite loss detected @ step 3; skipping step and reducing lr_mult -> 0.25
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[8,49584] yb[min,max]=[8,49584] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step3_micro0.pt
+[warn] non-finite loss detected @ step 4; skipping step and reducing lr_mult -> 0.125
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50190] yb[min,max]=[1,50190] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step4_micro0.pt
+[warn] non-finite loss detected @ step 5; skipping step and reducing lr_mult -> 0.0625
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50029] yb[min,max]=[1,50029] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step5_micro0.pt
+[warn] non-finite loss detected @ step 6; skipping step and reducing lr_mult -> 0.0312
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50003] yb[min,max]=[0,50003] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step6_micro0.pt
+[warn] non-finite loss detected @ step 7; skipping step and reducing lr_mult -> 0.0156
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49600] yb[min,max]=[0,49600] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step7_micro0.pt
+[warn] non-finite loss detected @ step 8; skipping step and reducing lr_mult -> 0.00781
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50154] yb[min,max]=[0,50154] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step8_micro0.pt
+Traceback (most recent call last):
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 16, in <module>
+    raise SystemExit(main(sys.argv[1:]))
+                     ^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 12, in main
+    return run(args)
+           ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 311, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1377, in run_single
+    raise RuntimeError(
+RuntimeError: Aborting: 8 consecutive non-finite steps. Last detail: micro=1/2 loss=nan xb[min,max]=[0,49868] yb[min,max]=[0,49868] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step9_micro0.pt

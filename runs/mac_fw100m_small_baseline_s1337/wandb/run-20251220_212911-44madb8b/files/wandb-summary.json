@@ -1,0 +1,1 @@
+{"gbs":8,"ms_step":259.021415779063,"loss":NaN,"lr":2.9999999999999995e-10,"seq_len":1024,"ppl":Infinity,"mps_mem_alloc_bytes":8.545238272e+09,"tok_s":15813.364264419579,"ms_bwd":0,"ms_fwd":87.43463005224356,"_runtime":33.897095333,"_step":50,"_wandb":{"runtime":33},"ms_opt":0,"_timestamp":1.766262581785585e+09,"mps_mem_driver_bytes":2.0337475584e+10}

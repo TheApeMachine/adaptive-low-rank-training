@@ -1,0 +1,52 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/production/runs/rj028aar
+step 1/50000 loss=10.9776 ppl=58546.54 lr=0.0003 tok/s=6241 seq=1024 gbs=8 ms/step=1313
+step 50/50000 loss=7.5160 ppl=1837.12 lr=0.0003 tok/s=6386 seq=1024 gbs=8 ms/step=1283
+step 100/50000 loss=7.2683 ppl=1434.12 lr=0.0003 tok/s=6339 seq=1024 gbs=8 ms/step=1292
+step 150/50000 loss=6.7453 ppl=850.05 lr=0.0003 tok/s=5670 seq=1024 gbs=8 ms/step=1445
+step 200/50000 loss=6.4664 ppl=643.15 lr=0.0003 tok/s=4989 seq=1024 gbs=8 ms/step=1642
+step 250/50000 loss=6.5942 ppl=730.85 lr=0.0003 tok/s=5489 seq=1024 gbs=8 ms/step=1492
+step 300/50000 loss=6.4998 ppl=665.03 lr=0.0003 tok/s=5499 seq=1024 gbs=8 ms/step=1490
+step 350/50000 loss=6.4290 ppl=619.58 lr=0.0003 tok/s=5093 seq=1024 gbs=8 ms/step=1609
+step 400/50000 loss=6.6496 ppl=772.45 lr=0.0003 tok/s=5318 seq=1024 gbs=8 ms/step=1540
+step 450/50000 loss=6.3175 ppl=554.17 lr=0.0003 tok/s=5381 seq=1024 gbs=8 ms/step=1522
+step 500/50000 loss=6.1557 ppl=471.38 lr=0.0003 tok/s=5290 seq=1024 gbs=8 ms/step=1549
+step 550/50000 loss=6.0428 ppl=421.05 lr=0.0003 tok/s=5170 seq=1024 gbs=8 ms/step=1584
+step 600/50000 loss=6.1352 ppl=461.83 lr=0.0003 tok/s=5430 seq=1024 gbs=8 ms/step=1509
+step 650/50000 loss=6.1401 ppl=464.11 lr=0.0003 tok/s=5048 seq=1024 gbs=8 ms/step=1623
+step 700/50000 loss=5.8443 ppl=345.25 lr=0.0003 tok/s=5241 seq=1024 gbs=8 ms/step=1563
+step 750/50000 loss=5.9728 ppl=392.59 lr=0.0003 tok/s=5182 seq=1024 gbs=8 ms/step=1581
+step 800/50000 loss=5.8372 ppl=342.80 lr=0.0003 tok/s=5553 seq=1024 gbs=8 ms/step=1475
+step 850/50000 loss=5.8846 ppl=359.45 lr=0.0003 tok/s=5683 seq=1024 gbs=8 ms/step=1442
+step 900/50000 loss=5.9450 ppl=381.83 lr=0.0003 tok/s=6019 seq=1024 gbs=8 ms/step=1361
+step 950/50000 loss=5.7172 ppl=304.06 lr=0.0003 tok/s=5937 seq=1024 gbs=8 ms/step=1380
+step 1000/50000 loss=5.6181 ppl=275.37 lr=0.0003 tok/s=6050 seq=1024 gbs=8 ms/step=1354
+[eval] step 1000: train=5.7273 val=5.6995
+step 1050/50000 loss=5.7942 ppl=328.39 lr=0.0003 tok/s=6033 seq=1024 gbs=8 ms/step=1358
+step 1100/50000 loss=5.7153 ppl=303.46 lr=0.0003 tok/s=6022 seq=1024 gbs=8 ms/step=1360
+step 1150/50000 loss=5.7020 ppl=299.46 lr=0.0003 tok/s=5874 seq=1024 gbs=8 ms/step=1395
+step 1200/50000 loss=5.6922 ppl=296.56 lr=0.0003 tok/s=5792 seq=1024 gbs=8 ms/step=1414
+step 1250/50000 loss=5.5975 ppl=269.76 lr=0.0003 tok/s=5502 seq=1024 gbs=8 ms/step=1489
+step 1300/50000 loss=5.4292 ppl=227.97 lr=0.0003 tok/s=4995 seq=1024 gbs=8 ms/step=1640
+step 1350/50000 loss=5.6633 ppl=288.09 lr=0.0003 tok/s=5295 seq=1024 gbs=8 ms/step=1547
+step 1400/50000 loss=5.6371 ppl=280.66 lr=0.0003 tok/s=5348 seq=1024 gbs=8 ms/step=1532
+step 1450/50000 loss=5.4265 ppl=227.36 lr=0.0003 tok/s=5443 seq=1024 gbs=8 ms/step=1505
+step 1500/50000 loss=5.5825 ppl=265.73 lr=0.0003 tok/s=5441 seq=1024 gbs=8 ms/step=1506
+step 1550/50000 loss=5.4204 ppl=225.98 lr=0.0003 tok/s=5699 seq=1024 gbs=8 ms/step=1437
+step 1600/50000 loss=5.5921 ppl=268.30 lr=0.0003 tok/s=6066 seq=1024 gbs=8 ms/step=1350
+step 1650/50000 loss=5.6057 ppl=271.98 lr=0.0003 tok/s=6186 seq=1024 gbs=8 ms/step=1324
+step 1700/50000 loss=5.4955 ppl=243.59 lr=0.0003 tok/s=6057 seq=1024 gbs=8 ms/step=1353
+Traceback (most recent call last):
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 16, in <module>
+    raise SystemExit(main(sys.argv[1:]))
+                     ^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 12, in main
+    return run(args)
+           ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 311, in run
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1431, in run_single
+    if nan_policy == "reduce_lr":
+                 ^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 626, in _clip_grad_norm_fp32
+    g_det = g.detach()
+
+KeyboardInterrupt

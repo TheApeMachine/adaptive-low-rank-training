@@ -19,6 +19,28 @@ except Exception:
     _h5py = None  # type: ignore
 
 
+def _can_connect(host: str, port: int, *, timeout_s: float = 0.5) -> bool:
+    """Best-effort TCP connectivity probe (no DNS caching assumptions)."""
+    try:
+        import socket
+
+        with socket.create_connection((str(host), int(port)), timeout=float(timeout_s)):
+            return True
+    except Exception:
+        return False
+
+
+def _auto_wandb_mode() -> str:
+    """Pick a safe W&B mode based on environment and connectivity."""
+    env_mode = os.environ.get("WANDB_MODE", None)
+    if env_mode:
+        m = str(env_mode).strip().lower()
+        if m in ("online", "offline", "disabled"):
+            return m
+    # Default to offline unless we can confidently reach the API endpoint.
+    return "online" if _can_connect("api.wandb.ai", 443, timeout_s=0.5) else "offline"
+
+
 def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -106,14 +128,12 @@ class WandBWriter:
         try:
             import wandb  # type: ignore
 
-            # Make `--wandb` behave like `--tb`: if you enable it, it actually logs.
-            # The CLI defaults wandb-mode to "disabled" to avoid surprises, but when --wandb is set
-            # we treat "disabled" as "online" (unless the user explicitly asked for offline).
-            mode = str(mode or "disabled").lower()
-            if mode not in ("disabled", "online", "offline"):
-                mode = "disabled"
-            if mode == "disabled":
-                mode = "online"
+            # Robust default: "auto" selects online/offline based on connectivity; never hard-fail.
+            mode = str(mode or "auto").lower()
+            if mode not in ("auto", "disabled", "online", "offline"):
+                mode = "auto"
+            if mode in ("auto", "disabled"):
+                mode = _auto_wandb_mode()
 
             if name is None:
                 try:
@@ -150,14 +170,7 @@ class WandBWriter:
             except Exception:
                 pass
         except Exception as e:
-            # If the user asked for W&B, fail loudly when the package is missing; otherwise we'd
-            # silently log only locally and it looks like "nothing happens".
-            if isinstance(e, ModuleNotFoundError) and "wandb" in str(e):
-                raise ImportError(
-                    "W&B logging requested (--wandb) but the `wandb` package is not installed. "
-                    "Install it with `pip install wandb` (or `pip install -r requirements.txt`)."
-                ) from e
-            print(f"[warn] W&B not available: {e}. Disable with --wandb=0 or install wandb.", file=sys.stderr)
+            print(f"[warn] W&B not available; continuing without it: {e}", file=sys.stderr)
             self.run = None
 
     def maybe_log(self, event: Dict[str, Any]) -> None:
@@ -306,8 +319,20 @@ class RunLogger:
         self._wandb = None
 
         if self.instrument != "off":
-            self._jsonl_f = open(self.train_jsonl_path, "w", encoding="utf-8")
-            self.log({"type": "meta", "step": 0, "env": _env_info(device), "argv": sys.argv, "args": vars(args), "config": asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else getattr(cfg, "__dict__", {})})
+            resume_mode = bool(getattr(args, "resume", False) or getattr(args, "resume_path", None))
+            mode = "a" if (resume_mode and os.path.exists(self.train_jsonl_path)) else "w"
+            self._jsonl_f = open(self.train_jsonl_path, mode, encoding="utf-8")
+            # Always write a meta record for provenance; in resume mode, this becomes an additional breadcrumb.
+            self.log(
+                {
+                    "type": ("resume_meta" if resume_mode else "meta"),
+                    "step": 0,
+                    "env": _env_info(device),
+                    "argv": sys.argv,
+                    "args": vars(args),
+                    "config": asdict(cfg) if hasattr(cfg, "__dataclass_fields__") else getattr(cfg, "__dict__", {}),
+                }
+            )
 
         if self.instrument == "full" and _h5py is not None:
             try:
@@ -452,5 +477,4 @@ class RunLogger:
             Path(self.summary_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
         except Exception as e:
             print(f"[warn] Failed to write summary.md: {e}")
-
 

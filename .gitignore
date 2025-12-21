@@ -10,6 +10,7 @@ data/
 docs/v17 output differences.pdf
 docs/raw/
 __pycache__/
+.pycache/
 .venv/
 docs/RESEARCH_MASTER_PLAN.md
 EXPERIMENT_AUDIT.md
@@ -33,3 +34,4 @@ paper.fls
 paper.log
 paper.out
 *.wandb
+*.zip

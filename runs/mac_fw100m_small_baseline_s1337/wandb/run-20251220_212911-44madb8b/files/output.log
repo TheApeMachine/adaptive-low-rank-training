@@ -1,0 +1,156 @@
+[wandb] run: https://wandb.ai/p4n0p71c0n/production/runs/44madb8b
+step 1/50000 loss=10.9797 ppl=58669.44 lr=0.0003 tok/s=5755 seq=1024 gbs=8 ms/step=1424
+[warn] non-finite loss detected @ step 2; skipping step and reducing lr_mult -> 0.5
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50190] yb[min,max]=[0,50190] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step2_micro0.pt
+[warn] non-finite loss detected @ step 3; skipping step and reducing lr_mult -> 0.25
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[8,49584] yb[min,max]=[8,49584] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step3_micro0.pt
+[warn] non-finite loss detected @ step 4; skipping step and reducing lr_mult -> 0.125
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50190] yb[min,max]=[1,50190] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step4_micro0.pt
+[warn] non-finite loss detected @ step 5; skipping step and reducing lr_mult -> 0.0625
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50029] yb[min,max]=[1,50029] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step5_micro0.pt
+[warn] non-finite loss detected @ step 6; skipping step and reducing lr_mult -> 0.0312
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50003] yb[min,max]=[0,50003] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step6_micro0.pt
+[warn] non-finite loss detected @ step 7; skipping step and reducing lr_mult -> 0.0156
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49600] yb[min,max]=[0,49600] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step7_micro0.pt
+[warn] non-finite loss detected @ step 8; skipping step and reducing lr_mult -> 0.00781
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50154] yb[min,max]=[0,50154] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step8_micro0.pt
+[warn] non-finite loss detected @ step 9; skipping step and reducing lr_mult -> 0.00391
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49868] yb[min,max]=[0,49868] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step9_micro0.pt
+[warn] non-finite loss detected @ step 10; skipping step and reducing lr_mult -> 0.00195
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50000] yb[min,max]=[0,50000] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step10_micro0.pt
+[warn] non-finite loss detected @ step 11; skipping step and reducing lr_mult -> 0.000977
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50139] yb[min,max]=[0,50139] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step11_micro0.pt
+[warn] non-finite loss detected @ step 12; skipping step and reducing lr_mult -> 0.000488
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50035] yb[min,max]=[0,50035] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step12_micro0.pt
+[warn] non-finite loss detected @ step 13; skipping step and reducing lr_mult -> 0.000244
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50074] yb[min,max]=[1,50074] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step13_micro0.pt
+[warn] non-finite loss detected @ step 14; skipping step and reducing lr_mult -> 0.000122
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[7,50025] yb[min,max]=[7,50025] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step14_micro0.pt
+[warn] non-finite loss detected @ step 15; skipping step and reducing lr_mult -> 6.1e-05
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[4,50156] yb[min,max]=[4,50156] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step15_micro0.pt
+[warn] non-finite loss detected @ step 16; skipping step and reducing lr_mult -> 3.05e-05
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50167] yb[min,max]=[0,50167] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step16_micro0.pt
+[warn] non-finite loss detected @ step 17; skipping step and reducing lr_mult -> 1.53e-05
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50228] yb[min,max]=[0,50228] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step17_micro0.pt
+[warn] non-finite loss detected @ step 18; skipping step and reducing lr_mult -> 7.63e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50078] yb[min,max]=[1,50078] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step18_micro0.pt
+[warn] non-finite loss detected @ step 19; skipping step and reducing lr_mult -> 3.81e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[4,50134] yb[min,max]=[4,50134] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step19_micro0.pt
+[warn] non-finite loss detected @ step 20; skipping step and reducing lr_mult -> 1.91e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50220] yb[min,max]=[1,50220] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step20_micro0.pt
+[warn] non-finite loss detected @ step 21; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49866] yb[min,max]=[0,49866] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step21_micro0.pt
+[warn] non-finite loss detected @ step 22; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49743] yb[min,max]=[0,49743] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step22_micro0.pt
+[warn] non-finite loss detected @ step 23; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49795] yb[min,max]=[0,49795] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step23_micro0.pt
+[warn] non-finite loss detected @ step 24; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49775] yb[min,max]=[0,49775] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step24_micro0.pt
+[warn] non-finite loss detected @ step 25; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49966] yb[min,max]=[0,49966] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step25_micro0.pt
+[warn] non-finite loss detected @ step 26; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50049] yb[min,max]=[0,50049] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step26_micro0.pt
+[warn] non-finite loss detected @ step 27; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49974] yb[min,max]=[0,49974] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step27_micro0.pt
+[warn] non-finite loss detected @ step 28; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50072] yb[min,max]=[0,50072] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step28_micro0.pt
+[warn] non-finite loss detected @ step 29; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50000] yb[min,max]=[0,50000] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step29_micro0.pt
+[warn] non-finite loss detected @ step 30; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50243] yb[min,max]=[0,50243] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step30_micro0.pt
+[warn] non-finite loss detected @ step 31; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50076] yb[min,max]=[1,50076] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step31_micro0.pt
+[warn] non-finite loss detected @ step 32; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50063] yb[min,max]=[0,50063] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step32_micro0.pt
+[warn] non-finite loss detected @ step 33; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50221] yb[min,max]=[1,50221] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step33_micro0.pt
+[warn] non-finite loss detected @ step 34; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50228] yb[min,max]=[0,50228] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step34_micro0.pt
+[warn] non-finite loss detected @ step 35; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50254] yb[min,max]=[0,50254] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step35_micro0.pt
+[warn] non-finite loss detected @ step 36; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,49372] yb[min,max]=[1,49372] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step36_micro0.pt
+[warn] non-finite loss detected @ step 37; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49953] yb[min,max]=[0,49953] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step37_micro0.pt
+[warn] non-finite loss detected @ step 38; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49875] yb[min,max]=[0,49875] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step38_micro0.pt
+[warn] non-finite loss detected @ step 39; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50137] yb[min,max]=[0,50137] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step39_micro0.pt
+[warn] non-finite loss detected @ step 40; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50105] yb[min,max]=[0,50105] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step40_micro0.pt
+[warn] non-finite loss detected @ step 41; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[4,49881] yb[min,max]=[4,49881] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step41_micro0.pt
+[warn] non-finite loss detected @ step 42; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50086] yb[min,max]=[1,50086] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step42_micro0.pt
+[warn] non-finite loss detected @ step 43; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49715] yb[min,max]=[0,49715] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step43_micro0.pt
+[warn] non-finite loss detected @ step 44; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49807] yb[min,max]=[0,49807] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step44_micro0.pt
+[warn] non-finite loss detected @ step 45; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[4,50161] yb[min,max]=[4,50161] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step45_micro0.pt
+[warn] non-finite loss detected @ step 46; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50154] yb[min,max]=[1,50154] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step46_micro0.pt
+[warn] non-finite loss detected @ step 47; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49948] yb[min,max]=[0,49948] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step47_micro0.pt
+[warn] non-finite loss detected @ step 48; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50225] yb[min,max]=[0,50225] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step48_micro0.pt
+[warn] non-finite loss detected @ step 49; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50004] yb[min,max]=[0,50004] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step49_micro0.pt
+[warn] non-finite loss detected @ step 50; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50237] yb[min,max]=[0,50237] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step50_micro0.pt
+step 50/50000 loss=nan ppl=inf lr=3e-10 tok/s=15813 seq=1024 gbs=8 ms/step=259
+[warn] non-finite loss detected @ step 51; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50122] yb[min,max]=[0,50122] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step51_micro0.pt
+[warn] non-finite loss detected @ step 52; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50254] yb[min,max]=[0,50254] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step52_micro0.pt
+[warn] non-finite loss detected @ step 53; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49957] yb[min,max]=[0,49957] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step53_micro0.pt
+[warn] non-finite loss detected @ step 54; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50237] yb[min,max]=[1,50237] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step54_micro0.pt
+[warn] non-finite loss detected @ step 55; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50190] yb[min,max]=[0,50190] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step55_micro0.pt
+[warn] non-finite loss detected @ step 56; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50076] yb[min,max]=[0,50076] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step56_micro0.pt
+[warn] non-finite loss detected @ step 57; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50043] yb[min,max]=[0,50043] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step57_micro0.pt
+[warn] non-finite loss detected @ step 58; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50070] yb[min,max]=[0,50070] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step58_micro0.pt
+[warn] non-finite loss detected @ step 59; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49519] yb[min,max]=[0,49519] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step59_micro0.pt
+[warn] non-finite loss detected @ step 60; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49956] yb[min,max]=[0,49956] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step60_micro0.pt
+[warn] non-finite loss detected @ step 61; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50255] yb[min,max]=[1,50255] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step61_micro0.pt
+[warn] non-finite loss detected @ step 62; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50243] yb[min,max]=[0,50243] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step62_micro0.pt
+[warn] non-finite loss detected @ step 63; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49932] yb[min,max]=[0,49932] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step63_micro0.pt
+[warn] non-finite loss detected @ step 64; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50126] yb[min,max]=[0,50126] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step64_micro0.pt
+[warn] non-finite loss detected @ step 65; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,49807] yb[min,max]=[1,49807] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step65_micro0.pt
+[warn] non-finite loss detected @ step 66; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49657] yb[min,max]=[0,49657] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step66_micro0.pt
+[warn] non-finite loss detected @ step 67; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,49972] yb[min,max]=[1,49972] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step67_micro0.pt
+[warn] non-finite loss detected @ step 68; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,50097] yb[min,max]=[0,50097] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step68_micro0.pt
+[warn] non-finite loss detected @ step 69; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[1,50097] yb[min,max]=[1,50097] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step69_micro0.pt
+[warn] non-finite loss detected @ step 70; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[0,49406] yb[min,max]=[0,49406] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step70_micro0.pt
+[warn] non-finite loss detected @ step 71; skipping step and reducing lr_mult -> 1e-06
+[warn] non-finite loss detail: micro=1/2 loss=nan xb[min,max]=[8,50250] yb[min,max]=[8,50250] xb_oob=0 yb_oob=0 logits_nan=True logits_inf=False logits_last_nan=True logits_last_inf=False logits_last_max|x|~0 dump=runs/mac_fw100m_small_baseline_s1337/nonfinite_loss_step71_micro0.pt
+Traceback (most recent call last):
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 16, in <module>
+    raise SystemExit(main(sys.argv[1:]))
+                     ^^^^^^^^^^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py", line 12, in main
+    return run(args)
+           ^^^^^^^^^
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/cli.py", line 311, in run
+    run_single(args, device)
+  File "/Users/theapemachine/go/src/github.com/theapemachine/experiments/production/runner.py", line 1243, in run_single
+    loss_sum_t = torch.full_like(loss_sum_t, float("nan"))
+                                             ^^^^^^^^^^^^
+KeyboardInterrupt

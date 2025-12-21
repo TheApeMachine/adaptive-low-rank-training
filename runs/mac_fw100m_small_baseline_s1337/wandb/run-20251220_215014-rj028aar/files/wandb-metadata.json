@@ -1,0 +1,74 @@
+{
+  "os": "macOS-15.6-arm64-arm-64bit",
+  "python": "CPython 3.12.12",
+  "startedAt": "2025-12-20T20:50:14.567898Z",
+  "args": [
+    "--mode",
+    "train",
+    "--size",
+    "small",
+    "--exp",
+    "paper_baseline",
+    "--data",
+    "fineweb_100m.npy",
+    "--out-dir",
+    "runs/mac_fw100m_small_baseline_s1337",
+    "--seed",
+    "1337",
+    "--steps",
+    "50000",
+    "--eval-every",
+    "1000",
+    "--eval-iters",
+    "20",
+    "--save-every",
+    "2000",
+    "--instrument",
+    "full",
+    "--tokenizer",
+    "tiktoken",
+    "--block",
+    "1024",
+    "--wandb",
+    "--wandb-name",
+    "mac_fw100m_small_baseline_s1337",
+    "--wandb-project",
+    "production",
+    "--wandb-entity",
+    "p4n0p71c0n",
+    "--wandb-group",
+    "mac_fw100m"
+  ],
+  "program": "/Users/theapemachine/go/src/github.com/theapemachine/experiments/main.py",
+  "codePath": "main.py",
+  "codePathLocal": "main.py",
+  "git": {
+    "remote": "https://github.com/TheApeMachine/experiments.git",
+    "commit": "9c8f3e0bffed2f2b3ef09555d25075d9b05fe894"
+  },
+  "email": "theapemachine@gmail.com",
+  "root": "runs/mac_fw100m_small_baseline_s1337",
+  "host": "marvin-2.localdomain",
+  "executable": "/Users/theapemachine/go/src/github.com/theapemachine/experiments/.venv/bin/python3.12",
+  "cpu_count": 16,
+  "cpu_count_logical": 16,
+  "disk": {
+    "/": {
+      "total": "1995218165760",
+      "used": "1064042029056"
+    }
+  },
+  "memory": {
+    "total": "137438953472"
+  },
+  "apple": {
+    "name": "Apple M4 Max",
+    "ecpuCores": 4,
+    "pcpuCores": 12,
+    "gpuCores": 40,
+    "memoryGb": 128,
+    "swapTotalBytes": "4294967296",
+    "ramTotalBytes": "137438953472"
+  },
+  "writerId": "054eg1nornsx29bx1nrq3eoj5l4ka6bl"
+}

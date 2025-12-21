@@ -3,33 +3,50 @@
 generate_paper_figures.py
 
 Generates all figures for the paper by reading instrumented experiment logs.
-This script reads the JSONL logs from runs/paper_*/ directories and creates
+This script reads the JSONL logs from run directories listed in `paper_manifest.json` and creates
 publication-ready visualizations.
 
 Usage:
     python3.12 generate_paper_figures.py
 
 Outputs:
-    assets/fig1_convergence_wikitext.png    - WikiText-2 convergence comparison
-    assets/fig2_convergence_fineweb.png     - FineWeb-Edu convergence comparison
-    assets/fig3_pareto.png                  - Memory vs Quality trade-off
-    assets/fig4_comparison_bar.png          - Final loss comparison
-    assets/table1_results.tex               - LaTeX table for WikiText-2
-    assets/table2_results.tex               - LaTeX table for FineWeb
+    assets/paper_results.json               - Single source-of-truth for numbers
+    assets/fig_convergence.png              - Convergence comparison
+    assets/fig_pareto_memory_vs_loss.png    - KV@128k vs quality trade-off
+    assets/table_main.tex                   - Main LaTeX results table
+    assets/table_scale.tex                  - Scale LaTeX results table (A100 1B)
 """
 
 import json
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
-# Experiment directories to parse (FineWeb-Edu only)
-# Will auto-detect SIZE from run directory names (tiny_, small_, medium_, large_)
+MANIFEST_PATH = Path("paper_manifest.json")
+
+
+def _load_manifest(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def discover_from_manifest(manifest_path: Path) -> Dict[str, str]:
+    """Return mapping key->run_dir from paper_manifest.json."""
+    root = _load_manifest(manifest_path)
+    out: Dict[str, str] = {}
+    for g in root.get("groups", []):
+        for r in g.get("runs", []):
+            rid = str(r.get("id"))
+            run_dir = str(Path("runs") / rid)
+            out[rid] = run_dir
+    return out
+
+
+# Fallback: scan runs/ for historical layouts if no manifest is present.
 
 def discover_experiments() -> dict:
     """Auto-discover experiment runs by scanning runs/ directory."""
@@ -68,11 +85,7 @@ def discover_experiments() -> dict:
     
     return experiments
 
-PAPER_EXPERIMENTS = discover_experiments()
-
-# Legacy mapping for backward compatibility
-WIKITEXT_EXPERIMENTS = {}  # Removed - FineWeb only
-FINEWEB_EXPERIMENTS = PAPER_EXPERIMENTS  # Now the main experiments
+PAPER_EXPERIMENTS = discover_from_manifest(MANIFEST_PATH) if MANIFEST_PATH.exists() else discover_experiments()
 
 # Memory data is now read from actual measurements in train.jsonl
 # No more estimates - we measure everything
@@ -94,7 +107,7 @@ class ExperimentResult:
     total_time: float
     attn_dim: int
     
-    # Measured memory (from instrumentation, not estimates)
+    # KV-cache memory @128k from `runs/<id>/mem128k.json` (produced by production bench tool)
     model_params_mb: float = 0.0
     kv_cache_train_mb: float = 0.0
     kv_cache_128k_fp16_mb: float = 0.0
@@ -179,6 +192,24 @@ def parse_experiment(name: str, run_dir: str) -> Optional[ExperimentResult]:
     attn_dim = config.get("attn_dim", 512)
     if config.get("attn_mode") == "decoupled":
         attn_dim = config.get("sem_dim", 32) + config.get("geo_dim", 64)
+
+    # Preferred memory source: mem128k.json produced by `production.bench_end_to_end_memory`.
+    mem_path = Path(run_dir) / "mem128k.json"
+    if mem_path.exists():
+        try:
+            mem = json.loads(mem_path.read_text(encoding="utf-8"))
+            est_sel = mem.get("estimate_selected", {}) or {}
+            est_bytes = float(est_sel.get("estimated_bytes", 0.0) or 0.0)
+            kv_cache_128k_fp16_mb = est_bytes / (1024.0 * 1024.0)
+
+            dec = mem.get("decomposition", None)
+            if isinstance(dec, dict):
+                est = dec.get("estimate_bytes", {}) or {}
+                kv_cache_128k_fp16_mb = float(est.get("decoupled_fp16", est_bytes) or 0.0) / (1024.0 * 1024.0)
+                kv_cache_128k_q4_mb = float(est.get("decoupled_candidate", 0.0) or 0.0) / (1024.0 * 1024.0)
+                compression_ratio = float(est.get("ratio_e2e_standard_over_candidate", 1.0) or 1.0)
+        except Exception:
+            pass
     
     return ExperimentResult(
         name=name,
@@ -199,7 +230,7 @@ def parse_experiment(name: str, run_dir: str) -> Optional[ExperimentResult]:
 
 def load_all_experiments() -> Tuple[Dict[str, ExperimentResult], Dict[str, ExperimentResult]]:
     """Load all experiment results."""
-    print("\nLoading FineWeb-Edu experiments (paper_*)...")
+    print("\nLoading FineWeb-Edu experiments (paper manifest)...")
     experiments = {}
     for name, path in PAPER_EXPERIMENTS.items():
         result = parse_experiment(name, path)
@@ -225,21 +256,24 @@ def generate_convergence_plot(
     
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Color scheme
-    colors = {
-        "Standard (512)": "#333333",
-        "Combined 96": "#4CAF50",
-        "Decoupled (32/64)": "#2196F3",
-        "Bottleneck 128": "#9C27B0",
-        "GQA (8Q/2KV)": "#FF9800",
-        "Small (d=128)": "#F44336",
-    }
+    def _color_for(name: str) -> str:
+        n = str(name).lower()
+        if "baseline" in n or "standard" in n:
+            return "#333333"
+        if "bottleneck" in n:
+            return "#9C27B0"
+        if "decoupled" in n:
+            return "#2196F3"
+        if "gqa" in n:
+            return "#FF9800"
+        return "#666666"
     
     for name, result in experiments.items():
-        color = colors.get(name, "#666666")
-        linewidth = 2.5 if name == highlight_key or name == "Standard (512)" else 1.5
-        linestyle = "--" if name == "Standard (512)" else "-"
-        marker = "s" if name == "Standard (512)" else "o"
+        color = _color_for(name)
+        hi = (str(highlight_key).lower() in str(name).lower()) if highlight_key else False
+        linewidth = 2.5 if hi else 1.6
+        linestyle = "-" if hi else "-"
+        marker = "o"
         
         ax.plot(
             result.eval_steps, 
@@ -265,66 +299,32 @@ def generate_convergence_plot(
     print(f"  → Saved: {output_path}")
 
 
-def generate_pareto_plot(
-    wikitext: Dict[str, ExperimentResult],
-    fineweb: Dict[str, ExperimentResult],
-    output_path: Path
-):
-    """Generate Pareto frontier showing memory vs quality trade-off."""
+def generate_pareto_plot(experiments: Dict[str, ExperimentResult], output_path: Path) -> None:
+    """Generate Pareto plot: KV-cache @128k (FP16 MB) vs best validation loss."""
     import matplotlib.pyplot as plt
-    
+
+    pts = [(n, r) for n, r in experiments.items() if float(r.kv_cache_128k_fp16_mb) > 0.0]
+    if not pts:
+        print("  ⚠ No mem128k.json data found; skipping Pareto plot.")
+        return
+
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # WikiText-2 points
-    wt_dims = [r.attn_dim for r in wikitext.values()]
-    wt_vals = [r.best_val for r in wikitext.values()]
-    wt_names = list(wikitext.keys())
-    
-    ax.scatter(wt_dims, wt_vals, c='#2196F3', s=100, zorder=5, 
-               label='WikiText-2', edgecolors='white', linewidth=1.5)
-    
-    for i, name in enumerate(wt_names):
-        offset = (8, 5)
-        if "Combined" in name:
-            offset = (8, -12)
-        ax.annotate(name, (wt_dims[i], wt_vals[i]), 
-                   textcoords="offset points", xytext=offset,
-                   fontsize=8, color='#2196F3')
-    
-    # FineWeb points
-    if fineweb:
-        fw_dims = [r.attn_dim for r in fineweb.values()]
-        fw_vals = [r.best_val for r in fineweb.values()]
-        fw_names = list(fineweb.keys())
-        
-        ax.scatter(fw_dims, fw_vals, c='#FF5722', s=100, zorder=5,
-                   label='FineWeb-Edu', marker='s', edgecolors='white', linewidth=1.5)
-        
-        for i, name in enumerate(fw_names):
-            ax.annotate(name, (fw_dims[i], fw_vals[i]),
-                       textcoords="offset points", xytext=(8, 5),
-                       fontsize=8, color='#FF5722')
-    
-    ax.set_xlabel("Attention Dimension (d_attn)", fontsize=12)
-    ax.set_ylabel("Best Validation Loss", fontsize=12)
-    ax.set_title("Pareto Frontier: Compression vs Quality", fontsize=14, fontweight='bold')
-    ax.legend(fontsize=10, loc='upper left')
+
+    xs = [float(r.kv_cache_128k_fp16_mb) for _, r in pts]
+    ys = [float(r.best_val) for _, r in pts]
+    names = [n for n, _ in pts]
+
+    ax.scatter(xs, ys, c="#FF5722", s=90, zorder=5, edgecolors="white", linewidth=1.2)
+    for i, name in enumerate(names):
+        ax.annotate(name, (xs[i], ys[i]), textcoords="offset points", xytext=(8, 5), fontsize=7)
+
+    ax.set_xlabel("KV cache @128k (MB, FP16)", fontsize=12)
+    ax.set_ylabel("Best validation loss", fontsize=12)
+    ax.set_title("Pareto: KV-cache memory vs quality (FineWeb-Edu)", fontsize=14, fontweight="bold")
     ax.grid(True, alpha=0.3)
-    
-    # Memory savings annotation
-    if "Standard (512)" in wikitext and "Combined 96" in wikitext:
-        std = wikitext["Standard (512)"]
-        comb = wikitext["Combined 96"]
-        ratio = std.attn_dim / comb.attn_dim
-        ax.annotate(
-            f"{ratio:.1f}× memory\nreduction",
-            xy=(comb.attn_dim + 20, comb.best_val),
-            fontsize=10,
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-        )
-    
+
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"  → Saved: {output_path}")
 
@@ -443,7 +443,8 @@ def generate_comparison_bar(
 def generate_latex_table(
     experiments: Dict[str, ExperimentResult],
     output_path: Path,
-    caption: str
+    caption: str,
+    label: Optional[str] = None,
 ):
     """Generate a LaTeX table for the paper with measured memory data."""
     import math
@@ -456,6 +457,7 @@ def generate_latex_table(
             r"\begin{table}[htbp]",
             r"\centering",
             r"\caption{" + caption + r"}",
+            (r"\label{" + str(label) + r"}" if label else ""),
             r"\begin{tabular}{@{}lccccc@{}}",
             r"\toprule",
             r"Model & $d_{attn}$ & Val Loss & PPL & KV@128k (MB) & Compress. \\",
@@ -466,6 +468,7 @@ def generate_latex_table(
             r"\begin{table}[htbp]",
             r"\centering",
             r"\caption{" + caption + r"}",
+            (r"\label{" + str(label) + r"}" if label else ""),
             r"\begin{tabular}{@{}lcccc@{}}",
             r"\toprule",
             r"Model & $d_{attn}$ & Val Loss & PPL & Time (s) \\",
@@ -603,8 +606,28 @@ def main():
     
     if not fineweb:
         print("\n⚠ No experiment data found!")
-        print("Run experiments first: make paper_all")
+        print("Run experiments via manifest: `python run_paper_manifest.py --group mac_fw100m`")
         return
+
+    # Write a single-source-of-truth JSON artifact for paper numbers.
+    try:
+        paper_results: Dict[str, Any] = {}
+        for name, r in fineweb.items():
+            paper_results[name] = {
+                "best_val": float(r.best_val),
+                "best_ppl": float(r.best_ppl),
+                "steps": int(r.eval_steps[-1]) if r.eval_steps else 0,
+                "attn_mode": str(r.config.get("attn_mode", "")),
+                "d_model": int(r.config.get("d_model", 0) or 0),
+                "layers": int(r.config.get("n_layer", r.config.get("layers", 0)) or 0),
+                "kv_cache_128k_fp16_mb": float(r.kv_cache_128k_fp16_mb),
+                "kv_cache_128k_q4_mb": float(r.kv_cache_128k_q4_mb),
+                "compression_ratio_e2e": float(r.compression_ratio),
+            }
+        (OUTPUT_DIR / "paper_results.json").write_text(json.dumps(paper_results, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"\nWrote: {OUTPUT_DIR / 'paper_results.json'}")
+    except Exception as e:
+        print(f"[warn] failed to write assets/paper_results.json: {e}")
     
     print("\nGenerating figures...")
     print("-" * 40)
@@ -613,23 +636,19 @@ def main():
         import matplotlib
         matplotlib.use('Agg')
         
-        # Fig 1: FineWeb Convergence
-        if fineweb:
-            generate_convergence_plot(
-                fineweb,
-                OUTPUT_DIR / "fig1_convergence.png",
-                "FineWeb-Edu: Validation Loss Convergence",
-                highlight_key="Bottleneck"
-            )
-        
-        # Fig 2: Pareto
-        generate_pareto_plot({}, fineweb, OUTPUT_DIR / "fig2_pareto.png")
-        
-        # Fig 3: Bar comparison
-        generate_comparison_bar({}, fineweb, OUTPUT_DIR / "fig3_comparison_bar.png")
-        
-        # Fig 4: Memory comparison (from actual measurements!)
-        generate_memory_plot(fineweb, OUTPUT_DIR / "fig4_memory.png")
+        # Fig: Convergence (prefer medium-sized runs if present)
+        conv = {k: v for k, v in fineweb.items() if "_medium_" in k}
+        if not conv:
+            conv = fineweb
+        generate_convergence_plot(
+            conv,
+            OUTPUT_DIR / "fig_convergence.png",
+            "FineWeb-Edu: Validation Loss Convergence",
+            highlight_key="decoupled",
+        )
+
+        # Fig: Pareto (KV@128k vs loss)
+        generate_pareto_plot(fineweb, OUTPUT_DIR / "fig_pareto_memory_vs_loss.png")
         
     except ImportError:
         print("⚠ matplotlib not installed - skipping plots")
@@ -637,12 +656,22 @@ def main():
     print("\nGenerating tables...")
     print("-" * 40)
     
-    # LaTeX table
-    if fineweb:
+    # Main LaTeX table (all FineWeb runs)
+    generate_latex_table(
+        fineweb,
+        OUTPUT_DIR / "table_main.tex",
+        "FineWeb-Edu results (production manifest runs). KV@128k values come from mem128k.json.",
+        label="tab:main",
+    )
+
+    # Scale LaTeX table (A100 1B runs only)
+    a100 = {k: v for k, v in fineweb.items() if k.startswith("a100_")}
+    if a100:
         generate_latex_table(
-            fineweb,
-            OUTPUT_DIR / "table1_fineweb.tex", 
-            "FineWeb-Edu Results (1024 context, 6000 steps)"
+            a100,
+            OUTPUT_DIR / "table_scale.tex",
+            "FineWeb-Edu scale results (A100 1B suite).",
+            label="tab:scale",
         )
     
     # Markdown summary

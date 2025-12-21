@@ -1,0 +1,28 @@
+{
+  "defaults": {
+    "eval_iters": 20,
+    "instrument": "full",
+    "save_every": 2000,
+    "tokenizer": "tiktoken",
+    "val_frac": 0.1,
+    "wandb": true,
+    "wandb_entity": "p4n0p71c0n",
+    "wandb_mode": "online",
+    "wandb_project": "production"
+  },
+  "group": "mac_fw100m",
+  "id": "mac_fw100m_small_baseline_s1337",
+  "resume_effective": "none",
+  "spec": {
+    "block": 1024,
+    "eval_every": 1000,
+    "exp": "paper_baseline",
+    "expected": {
+      "attn_mode": "standard"
+    },
+    "id": "mac_fw100m_small_baseline_s1337",
+    "seed": 1337,
+    "size": "small",
+    "steps": 50000
+  }
+}

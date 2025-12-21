@@ -1,0 +1,52 @@
+{
+  "train_plans": {
+    "mps|train|cfg=6623228c6c98481d|auto|amp=1|ampdt=torch.bfloat16": {
+      "by_seq": {
+        "512": [
+          8,
+          1
+        ]
+      },
+      "iters": 2,
+      "target_gbs": 0,
+      "ts": 1766272840.7769651,
+      "warmup": 1
+    },
+    "mps|train|cfg=aa1937b5062627c7|auto|amp=1|ampdt=torch.bfloat16": {
+      "by_seq": {
+        "1024": [
+          4,
+          1
+        ]
+      },
+      "iters": 2,
+      "target_gbs": 0,
+      "ts": 1766274061.5520792,
+      "warmup": 1
+    },
+    "mps|train|cfg=bb0f3daaeb1a0600|gbs=8|amp=1|ampdt=torch.bfloat16": {
+      "by_seq": {
+        "1024": [
+          8,
+          1
+        ]
+      },
+      "iters": 2,
+      "target_gbs": 8,
+      "ts": 1766263830.299167,
+      "warmup": 1
+    },
+    "mps|train|cfg=bb0f3daaeb1a0600|gbs=8|amp=1|ampdt=torch.float16": {
+      "by_seq": {
+        "1024": [
+          4,
+          2
+        ]
+      },
+      "iters": 2,
+      "target_gbs": 8,
+      "ts": 1766262567.662946,
+      "warmup": 1
+    }
+  }
+}

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import torch
+from production.selfopt_cache import get_cache_entry, set_cache_entry
+from production.selfopt_utils import device_sig
 
 try:
     import triton  # type: ignore
@@ -273,18 +275,6 @@ def _pow2_bucket(n: int) -> int:
     return 1 << (int(n - 1).bit_length())
 
 
-def _device_sig(device: torch.device) -> str:
-    if device.type == "cuda" and torch.cuda.is_available():
-        idx = device.index if device.index is not None else torch.cuda.current_device()
-        try:
-            name = torch.cuda.get_device_name(idx)
-        except Exception:
-            name = "cuda"
-        props = torch.cuda.get_device_properties(idx)
-        return f"cuda:{idx}:{name}:cc{props.major}{props.minor}"
-    return device.type
-
-
 class KVDecodeSelfOptimizer:
     """Self-optimizes decode performance knobs per prefix-length bucket."""
 
@@ -310,13 +300,10 @@ class KVDecodeSelfOptimizer:
         self._cache_path = cfg.cache_path
         if self._cache_path:
             try:
-                if os.path.exists(self._cache_path):
-                    with open(self._cache_path, "r") as f:
-                        raw0 = json.load(f)
-                    raw = raw0.get("decode_plans", raw0) if isinstance(raw0, dict) else {}
-                    if isinstance(raw, dict):
-                        for k, v in raw.items():
-                            self._plans[k] = KVDecodePlan(**v)
+                raw = get_cache_entry(self._cache_path, section="decode_plans", key="__all__")
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        self._plans[k] = KVDecodePlan(**v)
             except Exception as e:
                 if cfg.verbose:
                     print(f"[selfopt] Failed to load cache '{self._cache_path}': {e}")
@@ -325,26 +312,8 @@ class KVDecodeSelfOptimizer:
         if not self._cache_path:
             return
         try:
-            os.makedirs(os.path.dirname(self._cache_path) or ".", exist_ok=True)
             decode_plans = {k: asdict(v) for k, v in self._plans.items()}
-
-            root: Dict[str, Any] = {"version": 26, "decode_plans": decode_plans}
-            if os.path.exists(self._cache_path):
-                try:
-                    with open(self._cache_path, "r") as f:
-                        prev = json.load(f)
-                    if isinstance(prev, dict):
-                        if "decode_plans" in prev:
-                            root = dict(prev)
-                            root["version"] = 26
-                            root["decode_plans"] = decode_plans
-                        else:
-                            root = {"version": 26, "decode_plans": decode_plans}
-                except Exception:
-                    pass
-
-            with open(self._cache_path, "w") as f:
-                json.dump(root, f, indent=2, sort_keys=True)
+            set_cache_entry(str(self._cache_path), section="decode_plans", key="__all__", value=decode_plans)
         except Exception as e:
             if self.cfg.verbose:
                 print(f"[selfopt] Failed to save cache '{self._cache_path}': {e}")
@@ -359,7 +328,7 @@ class KVDecodeSelfOptimizer:
             dims = f"H={attn.H},hd_sem={attn.sem_head_dim},hd_geo={attn.geo_head_dim},hd_v={attn.v_head_dim}"
         except Exception:
             dims = "dims=unknown"
-        return f"{_device_sig(self.device)}|{bucket}|{dims}|{ksig}"
+        return f"{device_sig(self.device)}|{bucket}|{dims}|{ksig}"
 
     def _allowed_fused_modes(self, *, cache: Any) -> List[str]:
         if self.base_fused == "none":
@@ -403,7 +372,7 @@ class KVDecodeSelfOptimizer:
                 if use_profiles:
                     profs = get_triton_kernel_profiles(
                         mode=str(getattr(cfg, "kernel_profiles", "auto")),
-                        device_sig=_device_sig(self.device),
+                        device_sig=device_sig(self.device),
                         fused=fused,
                         decode_block=int(db),
                     )
@@ -875,13 +844,10 @@ class KVCachePolicySelfOptimizer:
 
         self._cache_path = cfg.cache_path
         self._policy_cache: Dict[str, Dict[str, Any]] = {}
-        if self._cache_path and os.path.exists(self._cache_path):
+        if self._cache_path:
             try:
-                with open(self._cache_path, "r") as f:
-                    root = json.load(f)
-                if isinstance(root, dict):
-                    cp = root.get("cache_policies", {})
-                    self._policy_cache = dict(cp) if isinstance(cp, dict) else {}
+                cp = get_cache_entry(self._cache_path, section="cache_policies", key="__all__")
+                self._policy_cache = dict(cp) if isinstance(cp, dict) else {}
             except Exception:
                 self._policy_cache = {}
 
@@ -889,20 +855,7 @@ class KVCachePolicySelfOptimizer:
         if not self._cache_path:
             return
         try:
-            os.makedirs(os.path.dirname(self._cache_path) or ".", exist_ok=True)
-            root: Dict[str, Any] = {"version": 26, "cache_policies": self._policy_cache}
-            if os.path.exists(self._cache_path):
-                try:
-                    with open(self._cache_path, "r") as f:
-                        prev = json.load(f)
-                    if isinstance(prev, dict):
-                        root = dict(prev)
-                        root["version"] = 26
-                        root["cache_policies"] = self._policy_cache
-                except Exception:
-                    pass
-            with open(self._cache_path, "w") as f:
-                json.dump(root, f, indent=2, sort_keys=True)
+            set_cache_entry(str(self._cache_path), section="cache_policies", key="__all__", value=self._policy_cache)
         except Exception:
             pass
 
@@ -923,7 +876,7 @@ class KVCachePolicySelfOptimizer:
     def _policy_key(self) -> str:
         max_bucket = _pow2_bucket(self.max_seq_len)
         dims = f"sem={self.model_cfg.sem_dim},geo={self.model_cfg.geo_dim},v={self.model_cfg.attn_dim},H={self.model_cfg.n_head}"
-        return f"{_device_sig(self.device)}|decoupled|max={max_bucket}|B={self.batch_size}|{dims}"
+        return f"{device_sig(self.device)}|decoupled|max={max_bucket}|B={self.batch_size}|{dims}"
 
     def _budget_bytes(self) -> int:
         if self.cfg.mem_budget_mb is not None:
@@ -1303,6 +1256,135 @@ class KVCachePolicySelfOptimizer:
 
         self._print_policy_summary(policy=best, L=L, best_ms=best_ms, budget_bytes=budget, policy_bytes=mem_bytes(best), note="chosen")
         return best
+
+    def shortlist_policies(self, *, prompt_len: int, max_candidates: int = 8) -> List[KVCachePolicy]:
+        """Return a small, ordered shortlist of plausible global cache policies.
+
+        Intended for higher-level selection logic that needs to test multiple candidates against
+        slower acceptance criteria (e.g. long-horizon quality gates) before committing.
+
+        Ordering: best-effort sort by (microbench_ms, mem_bytes) under this tuner's budget.
+        """
+        k = int(max_candidates)
+        if k <= 0:
+            k = 1
+
+        if self.cfg.mode == "none":
+            return [self.base_policy]
+        if getattr(self.model_cfg, "attn_mode", "standard") != "decoupled":
+            return [self.base_policy]
+
+        key = self._policy_key()
+        budget = self._budget_bytes()
+
+        def mem_bytes(pol: KVCachePolicy) -> int:
+            return estimate_decoupled_kvcache_bytes(
+                n_layer=self.model_cfg.n_layer,
+                batch_size=self.batch_size,
+                max_seq_len=self.max_seq_len,
+                sem_dim=self.model_cfg.sem_dim,
+                geo_dim=self.model_cfg.geo_dim,
+                v_dim=self.model_cfg.attn_dim,
+                policy=pol,
+            )
+
+        def ok_mem(pol: KVCachePolicy) -> bool:
+            try:
+                return mem_bytes(pol) <= budget
+            except Exception:
+                return False
+
+        # Prefix length benchmark bucket (same heuristic as choose_policy).
+        if self.cfg.policy_prefix_len is not None:
+            L = int(self.cfg.policy_prefix_len)
+        else:
+            L = int(min(self.max_seq_len - 1, max(1024, _pow2_bucket(int(prompt_len)))))
+        L = max(1, min(L, self.max_seq_len - 1))
+
+        cands: List[KVCachePolicy] = []
+
+        # Include cached policy (if any) and base policy (always).
+        if key in self._policy_cache:
+            try:
+                p = self._policy_cache[key]
+                cached = KVCachePolicy(**p)
+                cands.append(cached)
+            except Exception:
+                pass
+        cands.append(self.base_policy)
+
+        # Include the tuner's current best guess (may run microbenching; acceptable because k is small).
+        try:
+            best = self.choose_policy(prompt_len=int(prompt_len))
+            cands.append(best)
+        except Exception:
+            pass
+
+        # Include the "validated" heterogeneous candidate when plausible (q4/q8/q4 @32 + residual tail).
+        try:
+            resid_default = 128
+            try:
+                if getattr(self.cfg, "residuals", None):
+                    resid_default = int(max(int(x) for x in self.cfg.residuals))
+            except Exception:
+                resid_default = 128
+            validated = KVCachePolicy(
+                k_sem_kind="q4_0",
+                k_geo_kind="q8_0",
+                v_kind="q4_0",
+                k_sem_qblock=32,
+                k_geo_qblock=32,
+                v_qblock=32,
+                residual_len=int(resid_default),
+            )
+            cands.append(validated)
+        except Exception:
+            pass
+
+        # Add a small neighborhood around each seed candidate.
+        seeds = list(cands)
+        for p in seeds:
+            try:
+                cands.extend(self._neighbors(p))
+            except Exception:
+                pass
+
+        # Dedup + budget filter.
+        uniq: List[KVCachePolicy] = []
+        seen = set()
+        for p in cands:
+            try:
+                keyp = p.short()
+            except Exception:
+                continue
+            if keyp in seen:
+                continue
+            seen.add(keyp)
+            if ok_mem(p):
+                uniq.append(p)
+
+        if not uniq:
+            return [self.base_policy]
+
+        scored: List[Tuple[float, int, KVCachePolicy]] = []
+        for p in uniq:
+            try:
+                ms = float(self._bench_policy_ms(p, L_prefix=L))
+            except Exception:
+                ms = float("inf")
+            try:
+                mb = int(mem_bytes(p))
+            except Exception:
+                mb = 1 << 62
+            scored.append((ms, mb, p))
+
+        scored.sort(key=lambda x: (x[0], x[1]))
+        out: List[KVCachePolicy] = [p for _ms, _mb, p in scored[:k]]
+
+        # Always include base_policy somewhere for a safe fallback.
+        if all(p.short() != self.base_policy.short() for p in out):
+            out.append(self.base_policy)
+        return out
 
 
 def policy_quality_reject_reasons(

@@ -37,6 +37,7 @@ class _StubPolicyTuner:
     """Stand-in for KVCachePolicySelfOptimizer that returns a pre-configured policy."""
 
     policy_to_return: KVCachePolicy
+    policies_to_return: list[KVCachePolicy] = []
     updated_policies: list[KVCachePolicy] = []
 
     def __init__(self, *args, **kwargs):
@@ -45,12 +46,20 @@ class _StubPolicyTuner:
     def choose_policy(self, *, prompt_len: int) -> KVCachePolicy:
         return type(self).policy_to_return
 
+    def shortlist_policies(self, *, prompt_len: int, max_candidates: int = 8) -> list[KVCachePolicy]:
+        # Prefer explicit shortlist when provided; otherwise fall back to a singleton.
+        pols = list(type(self).policies_to_return) if type(self).policies_to_return else [type(self).policy_to_return]
+        k = int(max_candidates)
+        if k <= 0:
+            k = 1
+        return pols[:k]
+
     def update_cached_policy(self, policy: KVCachePolicy) -> None:
         type(self).updated_policies.append(policy)
 
 
 class TestChooseKVCachePolicyHelper(unittest.TestCase):
-    def test_no_selfopt_returns_inputs(self) -> None:
+    def test_no_policy_tuner_returns_inputs(self) -> None:
         m = _make_small_gpt()
         prompt = torch.zeros((1, 8), dtype=torch.long)
         k_sem = KVCacheTensorConfig(kind="q4_0", qblock=32, residual_len=128)
@@ -206,6 +215,60 @@ class TestChooseKVCachePolicyHelper(unittest.TestCase):
         warn_mock.assert_called()
         # Rejected long-horizon policy should be persisted as a fallback/base policy.
         self.assertTrue(any(p.short() == base_policy.short() for p in _StubPolicyTuner.updated_policies))
+
+    def test_long_horizon_prefers_other_global_policy_before_layerwise(self) -> None:
+        m = _make_small_gpt(n_layer=4)
+        prompt = torch.zeros((1, 128), dtype=torch.long)
+        k_sem = KVCacheTensorConfig(kind="q4_0", qblock=32, residual_len=128)
+        k_geo = KVCacheTensorConfig(kind="q8_0", qblock=32, residual_len=128)
+        v_dec = KVCacheTensorConfig(kind="q4_0", qblock=32, residual_len=128)
+
+        # Candidate A: fails long-horizon; Candidate B: passes long-horizon.
+        policy_a = KVCachePolicy(k_sem_kind="q4_0", k_geo_kind="q4_0", v_kind="q4_0", k_sem_qblock=32, k_geo_qblock=32, v_qblock=32, residual_len=64)
+        policy_b = KVCachePolicy(k_sem_kind="q4_0", k_geo_kind="q8_0", v_kind="q4_0", k_sem_qblock=32, k_geo_qblock=32, v_qblock=32, residual_len=64)
+
+        _StubPolicyTuner.policy_to_return = policy_a
+        _StubPolicyTuner.policies_to_return = [policy_a, policy_b]
+        _StubPolicyTuner.updated_policies = []
+
+        self_opt = KVSelfOptConfig(mode="startup", scope="cache", policy_quality=True, policy_quality_long=True, layerwise_cache=True)
+
+        def _qm_side_effect(*args, **kwargs):
+            pol = kwargs.get("policy", None)
+            dec_steps = int(kwargs.get("decode_steps", 0))
+            # Long horizon is the default 128-step window; force A to fail there.
+            if pol is not None and pol.short() == policy_a.short() and dec_steps >= 128:
+                return {"max_abs_logit": 999.0}
+            return {"max_abs_logit": 0.0}
+
+        with (
+            patch("production.model.KVCachePolicySelfOptimizer", _StubPolicyTuner),
+            patch.object(m, "_policy_quality_metrics_decoupled", side_effect=_qm_side_effect),
+            patch.object(m, "_policy_quality_metrics_decoupled_layerwise") as layerwise_mock,
+        ):
+            k_sem2, k_geo2, v_dec2, promote, kv_res2 = m._choose_kv_cache_policy(
+                model=m,
+                self_opt=self_opt,
+                device=prompt.device,
+                prompt=prompt,
+                k_sem_cfg=k_sem,
+                k_geo_cfg=k_geo,
+                v_dec_cfg=v_dec,
+                kv_residual=128,
+                kv_decode_block=1024,
+                kv_fused="auto",
+                max_new_tokens=16,
+                is_speculative=False,
+            )
+
+        exp_k_sem, exp_k_geo, exp_v = policy_b.to_tensor_cfgs()
+        self.assertEqual((k_sem2.kind, k_sem2.qblock, k_sem2.residual_len), (exp_k_sem.kind, exp_k_sem.qblock, exp_k_sem.residual_len))
+        self.assertEqual((k_geo2.kind, k_geo2.qblock, k_geo2.residual_len), (exp_k_geo.kind, exp_k_geo.qblock, exp_k_geo.residual_len))
+        self.assertEqual((v_dec2.kind, v_dec2.qblock, v_dec2.residual_len), (exp_v.kind, exp_v.qblock, exp_v.residual_len))
+        self.assertIsNone(promote)
+        self.assertEqual(kv_res2, int(policy_b.residual_len))
+        # Should not attempt layerwise promotion since a global policy passed long gate.
+        layerwise_mock.assert_not_called()
 
     def test_layerwise_speculative_print_and_promote(self) -> None:
         m = _make_small_gpt(n_layer=4)
