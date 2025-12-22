@@ -8,8 +8,16 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 from production.selfopt_cache import as_object_list, as_str_object_dict
+
+__all__ = [
+    "main",
+    "_normalize_instrument_level",
+    "_parse_print_config",
+    "_validate_expected",
+]
 
 
 def _repo_root() -> Path:
@@ -18,7 +26,7 @@ def _repo_root() -> Path:
 
 def _json_loads_obj(text: str) -> object:
     # `json.loads` is typed as returning `Any` in stubs; isolate it behind an `object` boundary.
-    return json.loads(text)  # pyright: ignore[reportAny]
+    return cast(object, json.loads(text))
 
 
 def _load_manifest(path: Path) -> dict[str, object]:
@@ -85,6 +93,54 @@ def _validate_expected(cfg: dict[str, object], expected: dict[str, object]) -> l
         if cfg.get(k) != v:
             errs.append(f"{k}: expected {v!r}, got {cfg.get(k)!r}")
     return errs
+
+
+def _parse_print_config(output: str) -> dict[str, object]:
+    """
+    Extract a JSON object from mixed stdout/stderr.
+
+    The paper harness prints config as a JSON object (potentially surrounded by logs).
+    We scan for the first valid JSON object and return it as a dict.
+    """
+    lines = str(output).splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "{":
+            continue
+        buf: list[str] = []
+        for j in range(i, len(lines)):
+            buf.append(lines[j])
+            txt = "\n".join(buf)
+            try:
+                obj = _json_loads_obj(txt)
+            except json.JSONDecodeError:
+                continue
+            d = as_str_object_dict(obj)
+            if d is not None:
+                return d
+    raise ValueError("could not find a JSON object in output")
+
+
+def _normalize_instrument_level(x: str) -> str:
+    """
+    Normalize user-facing instrument level.
+
+    Accepted:
+    - full/rich -> rich
+    - medium/basic -> basic
+    - off -> off
+    - auto -> auto
+    Unknown values default to rich.
+    """
+    s = str(x or "").strip().lower()
+    if s in ("full", "rich"):
+        return "rich"
+    if s in ("medium", "basic"):
+        return "basic"
+    if s in ("off",):
+        return "off"
+    if s in ("auto",):
+        return "auto"
+    return "rich"
 
 
 

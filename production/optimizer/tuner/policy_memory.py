@@ -2,20 +2,51 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import numbers
+from functools import lru_cache
+from typing import cast
+
 from production.optimizer.tuner.cache_estimates import estimate_decoupled_kvcache_bytes
 from production.optimizer.tuner.cache_policy import KVCachePolicy
 from production.optimizer.tuner.config import KVSelfOptConfig
 
 
+@lru_cache(maxsize=1)
+def _numpy_integer_type() -> type[object] | None:
+    if importlib.util.find_spec("numpy") is None:
+        return None
+    np_mod = importlib.import_module("numpy")
+    integer_t = cast(object, getattr(np_mod, "integer", None))
+    if isinstance(integer_t, type):
+        return integer_t
+    return None
+
+
 def _get_int_attr(o: object, name: str, default: int) -> int:
-    v = getattr(o, name, None)
+    v = cast(object | None, getattr(o, name, None))
+    if v is None:
+        return int(default)
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError as e:
+            raise TypeError(
+                f"Expected {type(o).__name__}.{name} to be int-like; got non-integer string {v!r}"
+            ) from e
     if isinstance(v, bool):
         return int(v)
-    if isinstance(v, int):
+    if isinstance(v, numbers.Integral):
         return int(v)
-    if isinstance(v, float):
-        return int(v)
-    return int(default)
+
+    np_integer_t = _numpy_integer_type()
+    if np_integer_t is not None and isinstance(v, np_integer_t):
+        return int(cast(int, v))
+
+    raise TypeError(
+        f"Expected {type(o).__name__}.{name} to be int-like; got {type(v).__name__} ({v!r})"
+    )
 
 
 def policy_mem_bytes(

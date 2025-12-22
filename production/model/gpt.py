@@ -3,7 +3,10 @@ gpt defines the neural architecture and orchestration for generation.
 """
 from __future__ import annotations
 from collections.abc import Callable
+import logging
 import math
+import sys
+from types import ModuleType
 from typing import Protocol, cast
 import torch
 from torch import nn
@@ -29,6 +32,20 @@ from .metrics import Metrics
 from .block import Block
 from .cache import Cache
 from .config import ModelConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_public_model_module() -> ModuleType | None:
+    """
+    Return the already-imported public API module (`production.model`) if present.
+
+    This avoids importing `production.model` from within `production.model.gpt`, which would create an
+    import cycle (package `__init__` imports `GPT` from this module).
+    """
+    mod = sys.modules.get("production.model")
+    return mod if isinstance(mod, ModuleType) else None
+
 
 class _CacheWithPos(Protocol):
     pos: int
@@ -80,16 +97,150 @@ class GPT(nn.Module):
     @staticmethod
     def _normalize_attn_mode(mode: object) -> str:
         v = getattr(mode, "value", mode)
-        s = str(v or "").strip().lower()
+        # Treat `None` as "unset"; preserve falsy-but-meaningful values (0/False) by not using `v or ""`.
+        s = "" if v is None else str(v).strip().lower()
+        if s == "":
+            return "bottleneck"
         if s in ("baseline", "standard", "base"):
             return "standard"
         if s in ("gqa", "bottleneck", "decoupled"):
             return s
-        return "bottleneck"
+        raise ValueError(
+            f'Unknown attn_mode={v!r} (normalized={s!r}). Accepted aliases: ("standard"/"baseline"/"base"), ("gqa"/"bottleneck"/"decoupled").'
+        )
 
     @staticmethod
     def _residual_for(kind: KVCacheKind, residual_len: int) -> int:
         return int(residual_len) if str(kind) not in ("fp16", "fp32") else 0
+
+    @staticmethod
+    def _kv_dim_for_mode(cfg: ModelConfig, mode: str) -> int:
+        """Compute KV cache per-layer feature dim for non-decoupled attention modes."""
+        try:
+            if mode == "standard":
+                kv_dim = int(getattr(cfg, "d_model", 0) or 0)
+            elif mode == "gqa":
+                nh = int(getattr(cfg, "n_head", 1) or 1)
+                attn_dim = int(getattr(cfg, "attn_dim", 0) or 0)
+                head_dim = int(attn_dim // max(1, nh))
+                kvh = int(getattr(cfg, "kv_head", None) or nh)
+                kv_dim = int(kvh * head_dim)
+            else:
+                kv_dim = int(getattr(cfg, "attn_dim", 0) or 0)
+            return int(max(1, kv_dim))
+        except (TypeError, ValueError):
+            return 1
+
+    @staticmethod
+    def _resolve_kv_tensor_cfgs(
+        *,
+        kv_cache: KVCacheKind,
+        kv_qblock: int,
+        kv_residual: int,
+        kv_cache_k: KVCacheKind | None,
+        kv_cache_v: KVCacheKind | None,
+        kv_cache_k_sem: KVCacheKind | None,
+        kv_cache_k_geo: KVCacheKind | None,
+        kv_qblock_k: int | None,
+        kv_qblock_v: int | None,
+        kv_qblock_k_sem: int | None,
+        kv_qblock_k_geo: int | None,
+    ) -> tuple[KVCacheTensorConfig, KVCacheTensorConfig, KVCacheTensorConfig, KVCacheTensorConfig]:
+        """Resolve per-tensor KV configs (K, V, K_sem, K_geo) from CLI/kwargs."""
+        k_kind = cast(KVCacheKind, str(kv_cache_k or kv_cache))
+        v_kind = cast(KVCacheKind, str(kv_cache_v or kv_cache))
+        k_qb = int(kv_qblock_k) if kv_qblock_k is not None else int(kv_qblock)
+        v_qb = int(kv_qblock_v) if kv_qblock_v is not None else int(kv_qblock)
+
+        k_sem_kind = cast(KVCacheKind, str(kv_cache_k_sem or kv_cache))
+        k_geo_default: KVCacheKind | None = None
+        if str(kv_cache) == "q4_0":
+            k_geo_default = "q8_0"
+        k_geo_kind = cast(KVCacheKind, str(kv_cache_k_geo or k_geo_default or kv_cache))
+        k_sem_qb = int(kv_qblock_k_sem) if kv_qblock_k_sem is not None else int(kv_qblock)
+        k_geo_qb = int(kv_qblock_k_geo) if kv_qblock_k_geo is not None else int(kv_qblock)
+
+        k_cfg = KVCacheTensorConfig(kind=k_kind, qblock=int(k_qb), residual_len=GPT._residual_for(k_kind, kv_residual))
+        v_cfg = KVCacheTensorConfig(kind=v_kind, qblock=int(v_qb), residual_len=GPT._residual_for(v_kind, kv_residual))
+        k_sem_cfg = KVCacheTensorConfig(
+            kind=k_sem_kind, qblock=int(k_sem_qb), residual_len=GPT._residual_for(k_sem_kind, kv_residual)
+        )
+        k_geo_cfg = KVCacheTensorConfig(
+            kind=k_geo_kind, qblock=int(k_geo_qb), residual_len=GPT._residual_for(k_geo_kind, kv_residual)
+        )
+        return k_cfg, v_cfg, k_sem_cfg, k_geo_cfg
+
+    def build_layer_caches(
+        self,
+        *,
+        model: "GPT",
+        mode: str,
+        batch_size: int,
+        max_seq_len: int,
+        device: torch.device,
+        k_cfg: KVCacheTensorConfig,
+        v_cfg: KVCacheTensorConfig,
+        k_sem_cfg: KVCacheTensorConfig,
+        k_geo_cfg: KVCacheTensorConfig,
+        promote_layers: int | None,
+        kv_decode_block: int,
+        kv_fused: str,
+    ) -> list[DecoupledLayerKVCache | LayerKVCache]:
+        """Build per-layer KV caches with optional layerwise fp16 promotion (decoupled)."""
+        # Resolve cache classes via the public `production.model` module *if it's already loaded* so
+        # tests can patch `production.model.LayerKVCache` / `production.model.DecoupledLayerKVCache`,
+        # without importing `production.model` (which would create an import cycle).
+        model_mod = _maybe_public_model_module()
+        LayerKVCacheCls = cast(
+            type[LayerKVCache],
+            getattr(model_mod, "LayerKVCache", LayerKVCache) if model_mod is not None else LayerKVCache,
+        )
+        DecoupledLayerKVCacheCls = cast(
+            type[DecoupledLayerKVCache],
+            getattr(model_mod, "DecoupledLayerKVCache", DecoupledLayerKVCache)
+            if model_mod is not None
+            else DecoupledLayerKVCache,
+        )
+
+        caches: list[DecoupledLayerKVCache | LayerKVCache] = []
+        n_layer = int(getattr(model.cfg, "n_layer", 0) or 0)
+
+        if mode == "decoupled":
+            fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
+            for i in range(n_layer):
+                use_fp16 = bool(promote_layers is not None and i < int(promote_layers))
+                caches.append(
+                    DecoupledLayerKVCacheCls(
+                        batch_size=int(batch_size),
+                        max_seq_len=int(max_seq_len),
+                        k_sem_dim=int(getattr(model.cfg, "sem_dim", 0) or 0),
+                        k_geo_dim=int(getattr(model.cfg, "geo_dim", 0) or 0),
+                        v_dim=int(getattr(model.cfg, "attn_dim", 0) or 0),
+                        k_sem_cfg=(fp16 if use_fp16 else k_sem_cfg),
+                        k_geo_cfg=(fp16 if use_fp16 else k_geo_cfg),
+                        v_cfg=(fp16 if use_fp16 else v_cfg),
+                        device=device,
+                    )
+                )
+        else:
+            kv_dim = self._kv_dim_for_mode(model.cfg, str(mode))
+            for _ in range(n_layer):
+                caches.append(
+                    LayerKVCacheCls(
+                        batch_size=int(batch_size),
+                        max_seq_len=int(max_seq_len),
+                        k_dim=int(kv_dim),
+                        v_dim=int(kv_dim),
+                        k_cfg=k_cfg,
+                        v_cfg=v_cfg,
+                        device=device,
+                    )
+                )
+
+        for c in caches:
+            setattr(c, "decode_block", int(kv_decode_block))
+            setattr(c, "fused", str(kv_fused))
+        return caches
 
     @override
     def forward(
@@ -205,28 +356,18 @@ class GPT(nn.Module):
         device = prompt.device
 
         # Resolve per-tensor KV configs.
-        k_kind = cast(KVCacheKind, str(kv_cache_k or kv_cache))
-        v_kind = cast(KVCacheKind, str(kv_cache_v or kv_cache))
-        k_qb = int(kv_qblock_k) if kv_qblock_k is not None else int(kv_qblock)
-        v_qb = int(kv_qblock_v) if kv_qblock_v is not None else int(kv_qblock)
-
-        # For decoupled, split K into semantic/geometric with separate defaults.
-        k_sem_kind = cast(KVCacheKind, str(kv_cache_k_sem or kv_cache))
-        k_geo_default: KVCacheKind | None = None
-        if str(kv_cache) == "q4_0":
-            k_geo_default = "q8_0"
-        k_geo_kind = cast(KVCacheKind, str(kv_cache_k_geo or k_geo_default or kv_cache))
-        k_sem_qb = int(kv_qblock_k_sem) if kv_qblock_k_sem is not None else int(kv_qblock)
-        k_geo_qb = int(kv_qblock_k_geo) if kv_qblock_k_geo is not None else int(kv_qblock)
-
-        # NOTE: residual_len is only meaningful for quantized caches (fp16/fp32 always keep residual_len=0).
-        k_cfg = KVCacheTensorConfig(kind=k_kind, qblock=int(k_qb), residual_len=self._residual_for(k_kind, kv_residual))
-        v_cfg = KVCacheTensorConfig(kind=v_kind, qblock=int(v_qb), residual_len=self._residual_for(v_kind, kv_residual))
-        k_sem_cfg = KVCacheTensorConfig(
-            kind=k_sem_kind, qblock=int(k_sem_qb), residual_len=self._residual_for(k_sem_kind, kv_residual)
-        )
-        k_geo_cfg = KVCacheTensorConfig(
-            kind=k_geo_kind, qblock=int(k_geo_qb), residual_len=self._residual_for(k_geo_kind, kv_residual)
+        k_cfg, v_cfg, k_sem_cfg, k_geo_cfg = GPT._resolve_kv_tensor_cfgs(
+            kv_cache=kv_cache,
+            kv_qblock=int(kv_qblock),
+            kv_residual=int(kv_residual),
+            kv_cache_k=kv_cache_k,
+            kv_cache_v=kv_cache_v,
+            kv_cache_k_sem=kv_cache_k_sem,
+            kv_cache_k_geo=kv_cache_k_geo,
+            kv_qblock_k=kv_qblock_k,
+            kv_qblock_v=kv_qblock_v,
+            kv_qblock_k_sem=kv_qblock_k_sem,
+            kv_qblock_k_geo=kv_qblock_k_geo,
         )
 
         mode = self._normalize_attn_mode(getattr(self.cfg, "attn_mode", ""))
@@ -237,6 +378,12 @@ class GPT(nn.Module):
         base_policy_s: str | None = None
         chosen_policy_s: str | None = None
         if mode == "decoupled":
+            base_k_sem_kind = cast(KVCacheKind, str(k_sem_cfg.kind))
+            base_k_geo_kind = cast(KVCacheKind, str(k_geo_cfg.kind))
+            base_v_kind = cast(KVCacheKind, str(v_cfg.kind))
+            base_k_sem_qb = int(k_sem_cfg.qblock)
+            base_k_geo_qb = int(k_geo_cfg.qblock)
+            base_v_qb = int(v_cfg.qblock)
             k_sem_cfg2, k_geo_cfg2, v_cfg2, promote_layers, kv_residual2 = self._choose_kv_cache_policy(
                 model=self,
                 self_opt=self_opt,
@@ -256,12 +403,12 @@ class GPT(nn.Module):
 
             try:
                 base_policy_s = KVCachePolicy(
-                    k_sem_kind=k_sem_kind,
-                    k_geo_kind=k_geo_kind,
-                    v_kind=v_kind,
-                    k_sem_qblock=int(k_sem_qb),
-                    k_geo_qblock=int(k_geo_qb),
-                    v_qblock=int(v_qb),
+                    k_sem_kind=base_k_sem_kind,
+                    k_geo_kind=base_k_geo_kind,
+                    v_kind=base_v_kind,
+                    k_sem_qblock=int(base_k_sem_qb),
+                    k_geo_qblock=int(base_k_geo_qb),
+                    v_qblock=int(base_v_qb),
                     residual_len=int(kv_residual2),
                 ).short()
                 chosen_policy_s = KVCachePolicy(
@@ -291,62 +438,20 @@ class GPT(nn.Module):
                 except (TypeError, ValueError, RuntimeError):
                     pass
 
-        # Build caches (one per layer).
-        # NOTE: We intentionally resolve cache classes at runtime so that tests can monkeypatch them.
-        # Import locally to avoid circular import issues.
-        LayerKVCacheRT = LayerKVCache
-        DecoupledLayerKVCacheRT = DecoupledLayerKVCache
-        caches: list[DecoupledLayerKVCache | LayerKVCache] = []
-        if mode == "decoupled":
-            fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
-            for i in range(int(getattr(self.cfg, "n_layer", 0) or 0)):
-                use_fp16 = bool(promote_layers is not None and i < int(promote_layers))
-                caches.append(
-                    DecoupledLayerKVCacheRT(
-                        batch_size=B,
-                        max_seq_len=max_seq,
-                        k_sem_dim=int(getattr(self.cfg, "sem_dim", 0) or 0),
-                        k_geo_dim=int(getattr(self.cfg, "geo_dim", 0) or 0),
-                        v_dim=int(getattr(self.cfg, "attn_dim", 0) or 0),
-                        k_sem_cfg=(fp16 if use_fp16 else k_sem_cfg),
-                        k_geo_cfg=(fp16 if use_fp16 else k_geo_cfg),
-                        v_cfg=(fp16 if use_fp16 else v_cfg),
-                        device=device,
-                    )
-                )
-        else:
-            # Standard/GQA/bottleneck all share the LayerKVCache shape; only dim differs.
-            try:
-                if mode == "standard":
-                    kv_dim = int(getattr(self.cfg, "d_model", 0) or 0)
-                elif mode == "gqa":
-                    nh = int(getattr(self.cfg, "n_head", 1) or 1)
-                    attn_dim = int(getattr(self.cfg, "attn_dim", 0) or 0)
-                    head_dim = int(attn_dim // max(1, nh))
-                    kvh = int(getattr(self.cfg, "kv_head", None) or nh)
-                    kv_dim = int(kvh * head_dim)
-                else:
-                    kv_dim = int(getattr(self.cfg, "attn_dim", 0) or 0)
-                kv_dim = int(max(1, kv_dim))
-            except (TypeError, ValueError):
-                kv_dim = 1
-
-            for _ in range(int(getattr(self.cfg, "n_layer", 0) or 0)):
-                caches.append(
-                    LayerKVCacheRT(
-                        batch_size=B,
-                        max_seq_len=max_seq,
-                        k_dim=int(kv_dim),
-                        v_dim=int(kv_dim),
-                        k_cfg=k_cfg,
-                        v_cfg=v_cfg,
-                        device=device,
-                    )
-                )
-
-        for c in caches:
-            setattr(c, "decode_block", int(kv_decode_block))
-            setattr(c, "fused", str(kv_fused))
+        caches = self.build_layer_caches(
+            model=self,
+            mode=str(mode),
+            batch_size=int(B),
+            max_seq_len=int(max_seq),
+            device=device,
+            k_cfg=k_cfg,
+            v_cfg=v_cfg,
+            k_sem_cfg=k_sem_cfg,
+            k_geo_cfg=k_geo_cfg,
+            promote_layers=promote_layers,
+            kv_decode_block=int(kv_decode_block),
+            kv_fused=str(kv_fused),
+        )
 
         # Fast path: no generation requested; still return prompt (caches were built for tests/benching).
         if int(max_new_tokens) == 0:
@@ -430,6 +535,30 @@ class GPT(nn.Module):
         log_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> torch.Tensor:
         """Speculative decoding (draft proposes, main verifies) with cache-safe rollback."""
+        if (not math_isfinite(float(temperature))) or float(temperature) <= 0.0:
+            # Greedy / invalid temp: fall back to the standard path (speculative acceptance needs a
+            # proper sampling distribution).
+            return self.generate(
+                prompt,
+                max_new_tokens=int(max_new_tokens),
+                temperature=float(temperature),
+                top_k=top_k,
+                kv_cache=kv_cache,
+                kv_qblock=kv_qblock,
+                kv_residual=kv_residual,
+                kv_decode_block=kv_decode_block,
+                kv_fused=kv_fused,
+                kv_cache_k=kv_cache_k,
+                kv_cache_v=kv_cache_v,
+                kv_cache_k_sem=kv_cache_k_sem,
+                kv_cache_k_geo=kv_cache_k_geo,
+                kv_qblock_k=kv_qblock_k,
+                kv_qblock_v=kv_qblock_v,
+                kv_qblock_k_sem=kv_qblock_k_sem,
+                kv_qblock_k_geo=kv_qblock_k_geo,
+                self_opt=self_opt,
+                log_callback=log_callback,
+            )
         if str(spec_method or "reject_sampling").strip().lower() not in ("reject_sampling",):
             raise ValueError(f"Unsupported spec_method: {spec_method!r}")
         if prompt.ndim != 2:
@@ -438,59 +567,26 @@ class GPT(nn.Module):
             raise ValueError("max_new_tokens must be >= 0")
 
         # Build separate KV runtimes for main + draft (their configs may differ).
-        # NOTE: We intentionally disable layerwise promotion unless the policy gate needs it (speculative only).
-        main_out = self.generate(
-            prompt,
-            max_new_tokens=0,
-            temperature=temperature,
-            top_k=top_k,
-            kv_cache=kv_cache,
-            kv_qblock=kv_qblock,
-            kv_residual=kv_residual,
-            kv_decode_block=kv_decode_block,
-            kv_fused=kv_fused,
-            kv_cache_k=kv_cache_k,
-            kv_cache_v=kv_cache_v,
-            kv_cache_k_sem=kv_cache_k_sem,
-            kv_cache_k_geo=kv_cache_k_geo,
-            kv_qblock_k=kv_qblock_k,
-            kv_qblock_v=kv_qblock_v,
-            kv_qblock_k_sem=kv_qblock_k_sem,
-            kv_qblock_k_geo=kv_qblock_k_geo,
-            self_opt=self_opt,
-            log_callback=log_callback,
-        )
-        _ = main_out  # caches are built inside generate(); we reuse forward/caches directly below.
-
-        # Rebuild caches explicitly so we can keep references for rollback (generate() does not expose them).
-        # NOTE: this is the one place we keep local cache-building logic duplicated for correctness.
+        # NOTE: We intentionally enable layerwise promotion for speculative decode (is_speculative=True).
         #       The non-speculative path stays in `generate()`.
         def _build_caches(m: GPT, *, is_speculative: bool) -> list[DecoupledLayerKVCache | LayerKVCache]:
             mode = GPT._normalize_attn_mode(getattr(m.cfg, "attn_mode", ""))
-            B = int(prompt.size(0))
+            batch_size = int(prompt.size(0))
             max_seq = int(prompt.size(1) + int(max_new_tokens))
 
-            # Use cache classes directly to avoid circular imports.
-            LayerKVCacheRT = LayerKVCache
-            DecoupledLayerKVCacheRT = DecoupledLayerKVCache
-
-            k_kind = cast(KVCacheKind, str(kv_cache_k or kv_cache))
-            v_kind = cast(KVCacheKind, str(kv_cache_v or kv_cache))
-            k_qb = int(kv_qblock_k) if kv_qblock_k is not None else int(kv_qblock)
-            v_qb = int(kv_qblock_v) if kv_qblock_v is not None else int(kv_qblock)
-
-            k_sem_kind = cast(KVCacheKind, str(kv_cache_k_sem or kv_cache))
-            k_geo_default: KVCacheKind | None = None
-            if str(kv_cache) == "q4_0":
-                k_geo_default = "q8_0"
-            k_geo_kind = cast(KVCacheKind, str(kv_cache_k_geo or k_geo_default or kv_cache))
-            k_sem_qb = int(kv_qblock_k_sem) if kv_qblock_k_sem is not None else int(kv_qblock)
-            k_geo_qb = int(kv_qblock_k_geo) if kv_qblock_k_geo is not None else int(kv_qblock)
-
-            k_cfg = KVCacheTensorConfig(kind=k_kind, qblock=int(k_qb), residual_len=GPT._residual_for(k_kind, kv_residual))
-            v_cfg = KVCacheTensorConfig(kind=v_kind, qblock=int(v_qb), residual_len=GPT._residual_for(v_kind, kv_residual))
-            k_sem_cfg = KVCacheTensorConfig(kind=k_sem_kind, qblock=int(k_sem_qb), residual_len=GPT._residual_for(k_sem_kind, kv_residual))
-            k_geo_cfg = KVCacheTensorConfig(kind=k_geo_kind, qblock=int(k_geo_qb), residual_len=GPT._residual_for(k_geo_kind, kv_residual))
+            k_cfg, v_cfg, k_sem_cfg, k_geo_cfg = GPT._resolve_kv_tensor_cfgs(
+                kv_cache=kv_cache,
+                kv_qblock=int(kv_qblock),
+                kv_residual=int(kv_residual),
+                kv_cache_k=kv_cache_k,
+                kv_cache_v=kv_cache_v,
+                kv_cache_k_sem=kv_cache_k_sem,
+                kv_cache_k_geo=kv_cache_k_geo,
+                kv_qblock_k=kv_qblock_k,
+                kv_qblock_v=kv_qblock_v,
+                kv_qblock_k_sem=kv_qblock_k_sem,
+                kv_qblock_k_geo=kv_qblock_k_geo,
+            )
 
             promote_layers = None
             if mode == "decoupled":
@@ -509,56 +605,20 @@ class GPT(nn.Module):
                     is_speculative=bool(is_speculative),
                 )
 
-            caches: list[DecoupledLayerKVCache | LayerKVCache] = []
-            if mode == "decoupled":
-                fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
-                for i in range(int(getattr(m.cfg, "n_layer", 0) or 0)):
-                    use_fp16 = bool(promote_layers is not None and i < int(promote_layers))
-                    caches.append(
-                        DecoupledLayerKVCacheRT(
-                            batch_size=B,
-                            max_seq_len=max_seq,
-                            k_sem_dim=int(getattr(m.cfg, "sem_dim", 0) or 0),
-                            k_geo_dim=int(getattr(m.cfg, "geo_dim", 0) or 0),
-                            v_dim=int(getattr(m.cfg, "attn_dim", 0) or 0),
-                            k_sem_cfg=(fp16 if use_fp16 else k_sem_cfg),
-                            k_geo_cfg=(fp16 if use_fp16 else k_geo_cfg),
-                            v_cfg=(fp16 if use_fp16 else v_cfg),
-                            device=prompt.device,
-                        )
-                    )
-            else:
-                try:
-                    if mode == "standard":
-                        kv_dim = int(getattr(m.cfg, "d_model", 0) or 0)
-                    elif mode == "gqa":
-                        nh = int(getattr(m.cfg, "n_head", 1) or 1)
-                        attn_dim = int(getattr(m.cfg, "attn_dim", 0) or 0)
-                        head_dim = int(attn_dim // max(1, nh))
-                        kvh = int(getattr(m.cfg, "kv_head", None) or nh)
-                        kv_dim = int(kvh * head_dim)
-                    else:
-                        kv_dim = int(getattr(m.cfg, "attn_dim", 0) or 0)
-                    kv_dim = int(max(1, kv_dim))
-                except (TypeError, ValueError):
-                    kv_dim = 1
-                for _ in range(int(getattr(m.cfg, "n_layer", 0) or 0)):
-                    caches.append(
-                        LayerKVCacheRT(
-                            batch_size=B,
-                            max_seq_len=max_seq,
-                            k_dim=int(kv_dim),
-                            v_dim=int(kv_dim),
-                            k_cfg=k_cfg,
-                            v_cfg=v_cfg,
-                            device=prompt.device,
-                        )
-                    )
-
-            for c in caches:
-                setattr(c, "decode_block", int(kv_decode_block))
-                setattr(c, "fused", str(kv_fused))
-            return caches
+            return m.build_layer_caches(
+                model=m,
+                mode=str(mode),
+                batch_size=int(batch_size),
+                max_seq_len=int(max_seq),
+                device=prompt.device,
+                k_cfg=k_cfg,
+                v_cfg=v_cfg,
+                k_sem_cfg=k_sem_cfg,
+                k_geo_cfg=k_geo_cfg,
+                promote_layers=promote_layers,
+                kv_decode_block=int(kv_decode_block),
+                kv_fused=str(kv_fused),
+            )
 
         main_caches = _build_caches(self, is_speculative=True)
         draft_caches = _build_caches(draft_model, is_speculative=True)
@@ -586,7 +646,11 @@ class GPT(nn.Module):
                 proposed: list[torch.Tensor] = []
                 q_probs: list[torch.Tensor] = []
                 for _ in range(int(k)):
-                    tok, p = Metrics.sample(draft_logits[:, -1, :], float(temperature))
+                    tok, p = Metrics.sample(
+                        draft_logits[:, -1, :],
+                        temperature=float(temperature),
+                        top_k=top_k,
+                    )
                     proposed.append(tok)
                     q_probs.append(p)
                     draft_logits, draft_caches3 = draft_model.forward(tok, caches=draft_caches, pos_offset=pos + len(proposed) - 1)
@@ -596,7 +660,14 @@ class GPT(nn.Module):
                 main_block, main_caches3 = self.forward(proposed_t, caches=main_caches, pos_offset=pos)
                 main_caches = main_caches3 or main_caches
 
-                accepted_k, next_tok = Metrics.verify(main_logits[:, -1, :], main_block, proposed_t, q_probs)
+                accepted_k, next_tok = Metrics.verify(
+                    main_logits[:, -1, :],
+                    main_block,
+                    proposed_t,
+                    q_probs,
+                    temperature=float(temperature),
+                    top_k=top_k,
+                )
                 accepted_k = int(accepted_k)
 
                 prop_total += int(k)
@@ -706,10 +777,36 @@ class GPT(nn.Module):
         is_speculative: bool,
     ) -> tuple[KVCacheTensorConfig, KVCacheTensorConfig, KVCacheTensorConfig, int | None, int]:
         """Choose decoupled KV cache policy, with optional quality gating and layerwise fallback."""
-        # Use imports directly to avoid circular import issues.
-        TunerCls = KVCachePolicySelfOptimizer
-        reject_reasons_fn = policy_quality_reject_reasons
-        warn_reject_fn = warn_policy_quality_reject
+        # Resolve via the public `production.model` module *if already loaded* so tests can patch:
+        # - production.model.KVCachePolicySelfOptimizer
+        # - production.model.policy_quality_reject_reasons
+        # - production.model.warn_policy_quality_reject
+        # - production.model.KVCachePolicy
+        #
+        # Do NOT import `production.model` here (would create an import cycle).
+        model_mod = _maybe_public_model_module()
+        TunerCls = cast(
+            type[KVCachePolicySelfOptimizer],
+            getattr(model_mod, "KVCachePolicySelfOptimizer", KVCachePolicySelfOptimizer)
+            if model_mod is not None
+            else KVCachePolicySelfOptimizer,
+        )
+        reject_reasons_fn = cast(
+            Callable[..., list[str]],
+            getattr(model_mod, "policy_quality_reject_reasons", policy_quality_reject_reasons)
+            if model_mod is not None
+            else policy_quality_reject_reasons,
+        )
+        warn_reject_fn = cast(
+            Callable[..., object],
+            getattr(model_mod, "warn_policy_quality_reject", warn_policy_quality_reject)
+            if model_mod is not None
+            else warn_policy_quality_reject,
+        )
+        PolicyCls = cast(
+            type[KVCachePolicy],
+            getattr(model_mod, "KVCachePolicy", KVCachePolicy) if model_mod is not None else KVCachePolicy,
+        )
 
         if self_opt is None:
             return k_sem_cfg, k_geo_cfg, v_dec_cfg, None, int(kv_residual)
@@ -721,7 +818,7 @@ class GPT(nn.Module):
             return k_sem_cfg, k_geo_cfg, v_dec_cfg, None, int(kv_residual)
 
         # Construct base/override policies.
-        base_policy = KVCachePolicy(
+        base_policy = PolicyCls(
             k_sem_kind=k_sem_cfg.kind,
             k_geo_kind=k_geo_cfg.kind,
             v_kind=v_dec_cfg.kind,
@@ -957,15 +1054,24 @@ class GPT(nn.Module):
         chosen: KVCachePolicy | None = None
         rejected: set[str] = set()
 
+        def _is_intrinsically_safe_base(pol: KVCachePolicy) -> bool:
+            return bool(
+                pol.k_sem_kind in ("fp16", "fp32")
+                and pol.k_geo_kind in ("fp16", "fp32")
+                and pol.v_kind in ("fp16", "fp32")
+            )
+
         def _gate_and_maybe_choose(cand: KVCachePolicy) -> bool:
             nonlocal chosen
             cshort = cand.short()
-            # Always accept base as a final fallback without gating (paper harness expects this).
-            if cshort == base_policy.short():
-                chosen = cand
-                return True
             if cshort in rejected:
                 return False
+            if (
+                cshort == base_policy.short()
+                and (bool(getattr(self_opt, "trust_base_policy", False)) or _is_intrinsically_safe_base(cand))
+            ):
+                chosen = cand
+                return True
 
             if (
                 cshort in self._policy_quality_ok
@@ -979,7 +1085,7 @@ class GPT(nn.Module):
             if reasons:
                 rejected.add(cshort)
                 try:
-                    warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons)
+                    _ = warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons)
                 except (TypeError, ValueError, RuntimeError):
                     pass
                 return False
@@ -989,7 +1095,7 @@ class GPT(nn.Module):
                 if reasons2:
                     rejected.add(cshort)
                     try:
-                        warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons2)
+                        _ = warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons2)
                     except (TypeError, ValueError, RuntimeError):
                         pass
                     return False
@@ -1000,7 +1106,7 @@ class GPT(nn.Module):
                 if reasons3:
                     rejected.add(cshort)
                     try:
-                        warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons3)
+                        _ = warn_reject_fn(chosen=cshort, fallback=base_policy.short(), reasons=reasons3)
                     except (TypeError, ValueError, RuntimeError):
                         pass
                     return False
@@ -1048,7 +1154,7 @@ class GPT(nn.Module):
                 for n in [1, 2, 4, 8, n_layer]:
                     if n <= 0 or n > n_layer:
                         continue
-                    metrics = self._policy_quality_metrics_decoupled_layerwise(
+                    metrics = self._policy_quality_metrics_decoupled(
                         model=model,
                         prompt=_gate_tokens(
                             spec=getattr(self_opt, "calib_tokens", None),
@@ -1088,6 +1194,7 @@ class GPT(nn.Module):
         model: "GPT",
         prompt: torch.Tensor,
         policy: "KVCachePolicy",
+        promote_layers: int | None = None,
         prefill: int,
         decode_steps: int,
         compute_kl: bool = False,
@@ -1115,6 +1222,7 @@ class GPT(nn.Module):
                 out["kl_base_cand"] = float("nan")
             return out
 
+        promote = int(max(0, int(promote_layers or 0)))
         try:
             fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
             ks, kg, vv = policy.to_tensor_cfgs()
@@ -1125,114 +1233,42 @@ class GPT(nn.Module):
                 Cache.build_layer(model.cfg, B, max_seq, prompt.device, k_sem=fp16, k_geo=fp16, v=fp16)
                 for _ in range(int(getattr(model.cfg, "n_layer", 0) or 0))
             ]
-            test_caches = [
-                Cache.build_layer(model.cfg, B, max_seq, prompt.device, k_sem=ks, k_geo=kg, v=vv)
-                for _ in range(int(getattr(model.cfg, "n_layer", 0) or 0))
-            ]
-
-            lb, base_caches2 = model.forward(prompt[:, :pre], caches=base_caches)
-            lt, test_caches2 = model.forward(prompt[:, :pre], caches=test_caches)
-            base_caches = base_caches2 or base_caches
-            test_caches = test_caches2 or test_caches
-
-            history: list[dict[str, float]] = []
-            for i in range(pre, pre + dec):
-                x = prompt[:, i : i + 1]
-                lb, base_caches2 = model.forward(x, caches=base_caches, pos_offset=int(i))
-                lt, test_caches2 = model.forward(x, caches=test_caches, pos_offset=int(i))
-                base_caches = base_caches2 or base_caches
-                test_caches = test_caches2 or test_caches
-                history.append(Metrics.compare(lb, lt, prompt[:, i + 1], compute_kl=bool(compute_kl)))
-
-            dnll = float(sum(float(h.get("delta_nll", 0.0)) for h in history) / float(len(history)))
-            mx = float(max(float(h.get("max_abs_logit", 0.0)) for h in history))
-            ppl_ratio = float(math.exp(dnll)) if math_isfinite(dnll) else float("nan")
-            out: dict[str, float] = {"max_abs_logit": mx, "delta_nll": dnll, "ppl_ratio": ppl_ratio}
-            if compute_kl:
-                out["kl_base_cand"] = float(
-                    sum(float(h.get("kl_base_cand", 0.0)) for h in history) / float(len(history))
-                )
-            return out
-        except (TypeError, ValueError, RuntimeError):
-            out = {"max_abs_logit": float("nan"), "delta_nll": float("nan"), "ppl_ratio": float("nan")}
-            if compute_kl:
-                out["kl_base_cand"] = float("nan")
-            return out
-
-    def _policy_quality_metrics_decoupled_layerwise(
-        self,
-        *,
-        model: "GPT",
-        prompt: torch.Tensor,
-        policy: "KVCachePolicy",
-        promote_layers: int,
-        prefill: int,
-        decode_steps: int,
-        compute_kl: bool = False,
-    ) -> dict[str, float]:
-        """Quality metrics for a policy with layerwise fp16 promotion (best-effort)."""
-        if prompt.ndim != 2:
-            out = {"max_abs_logit": float("nan"), "delta_nll": float("nan"), "ppl_ratio": float("nan")}
-            if compute_kl:
-                out["kl_base_cand"] = float("nan")
-            return out
-
-        pre = int(max(0, prefill))
-        dec = int(max(0, decode_steps))
-        T = int(prompt.size(1))
-        if T < 2:
-            out = {"max_abs_logit": float("nan"), "delta_nll": float("nan"), "ppl_ratio": float("nan")}
-            if compute_kl:
-                out["kl_base_cand"] = float("nan")
-            return out
-        pre = int(min(pre, T - 1))
-        dec = int(min(dec, T - pre - 1))
-        if dec <= 0 or pre <= 0:
-            out = {"max_abs_logit": float("nan"), "delta_nll": float("nan"), "ppl_ratio": float("nan")}
-            if compute_kl:
-                out["kl_base_cand"] = float("nan")
-            return out
-
-        promote = int(max(0, promote_layers))
-        try:
-            fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
-            ks, kg, vv = policy.to_tensor_cfgs()
-
-            B = int(prompt.size(0))
-            max_seq = int(pre + dec)
-            base_caches: list[DecoupledLayerKVCache | LayerKVCache] = [
-                Cache.build_layer(model.cfg, B, max_seq, prompt.device, k_sem=fp16, k_geo=fp16, v=fp16)
-                for _ in range(int(getattr(model.cfg, "n_layer", 0) or 0))
-            ]
             test_caches: list[DecoupledLayerKVCache | LayerKVCache] = []
             n_layer = int(getattr(model.cfg, "n_layer", 0) or 0)
-            for i in range(n_layer):
-                use_fp16 = bool(promote > 0 and i < promote)
-                test_caches.append(
-                    Cache.build_layer(
-                        model.cfg,
-                        B,
-                        max_seq,
-                        prompt.device,
-                        k_sem=(fp16 if use_fp16 else ks),
-                        k_geo=(fp16 if use_fp16 else kg),
-                        v=(fp16 if use_fp16 else vv),
+            if promote <= 0:
+                test_caches = [
+                    Cache.build_layer(model.cfg, B, max_seq, prompt.device, k_sem=ks, k_geo=kg, v=vv)
+                    for _ in range(n_layer)
+                ]
+            else:
+                for i in range(n_layer):
+                    use_fp16 = bool(i < promote)
+                    test_caches.append(
+                        Cache.build_layer(
+                            model.cfg,
+                            B,
+                            max_seq,
+                            prompt.device,
+                            k_sem=(fp16 if use_fp16 else ks),
+                            k_geo=(fp16 if use_fp16 else kg),
+                            v=(fp16 if use_fp16 else vv),
+                        )
                     )
-                )
 
-            lb, base_caches2 = model.forward(prompt[:, :pre], caches=base_caches)
-            lt, test_caches2 = model.forward(prompt[:, :pre], caches=test_caches)
-            base_caches = base_caches2 or base_caches
-            test_caches = test_caches2 or test_caches
-
-            history: list[dict[str, float]] = []
-            for i in range(pre, pre + dec):
-                x = prompt[:, i : i + 1]
-                lb, base_caches2 = model.forward(x, caches=base_caches, pos_offset=int(i))
-                lt, test_caches2 = model.forward(x, caches=test_caches, pos_offset=int(i))
+            with torch.inference_mode():
+                lb, base_caches2 = model.forward(prompt[:, :pre], caches=base_caches)
+                lt, test_caches2 = model.forward(prompt[:, :pre], caches=test_caches)
                 base_caches = base_caches2 or base_caches
                 test_caches = test_caches2 or test_caches
-                history.append(Metrics.compare(lb, lt, prompt[:, i + 1], compute_kl=bool(compute_kl)))
+
+                history: list[dict[str, float]] = []
+                for i in range(pre, pre + dec):
+                    x = prompt[:, i : i + 1]
+                    lb, base_caches2 = model.forward(x, caches=base_caches, pos_offset=int(i))
+                    lt, test_caches2 = model.forward(x, caches=test_caches, pos_offset=int(i))
+                    base_caches = base_caches2 or base_caches
+                    test_caches = test_caches2 or test_caches
+                    history.append(Metrics.compare(lb, lt, prompt[:, i + 1], compute_kl=bool(compute_kl)))
 
             dnll = float(sum(float(h.get("delta_nll", 0.0)) for h in history) / float(len(history)))
             mx = float(max(float(h.get("max_abs_logit", 0.0)) for h in history))
@@ -1257,7 +1293,7 @@ def _sample_next_token(logits: torch.Tensor, *, temperature: float, top_k: int |
         # Greedy.
         return torch.argmax(logits, dim=-1, keepdim=True).to(torch.long)
 
-    x = logits / float(temperature)
+    x = logits.float() / float(temperature)
     if top_k is not None:
         k = int(top_k)
         if k > 0 and k < int(x.size(-1)):

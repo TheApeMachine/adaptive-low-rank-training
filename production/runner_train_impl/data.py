@@ -31,7 +31,7 @@ def load_dataset(run_cfg: TrainConfig) -> DatasetState:
     """Why: resolve format, load tokens (mmap when possible), split, and infer vocab if needed."""
     import production.data as data_mod  # pylint: disable=import-outside-toplevel
 
-    def _as_int(o: object, default: int) -> int:
+    def _as_int(o: object, default: int | None) -> int | None:
         if isinstance(o, bool):
             return int(o)
         if isinstance(o, int):
@@ -42,16 +42,12 @@ def load_dataset(run_cfg: TrainConfig) -> DatasetState:
             try:
                 return int(o.strip())
             except ValueError:
-                return int(default)
-        return int(default)
-
-    def _load_tokens_obj(*, path: Path, fmt: str, data_dtype: str) -> object:
-        # `load_tokens_any` is typed loosely; isolate behind object boundary.
-        return data_mod.load_tokens_any(path=path, fmt=fmt, data_dtype=data_dtype)
+                return default
+        return default
 
     data_path = Path(str(run_cfg.data))
     fmt = data_mod.infer_data_format(data_path, str(run_cfg.data_format))
-    tokens = _load_tokens_obj(path=data_path, fmt=str(fmt), data_dtype=str(run_cfg.data_dtype))
+    tokens = data_mod.load_tokens_any(path=data_path, fmt=str(fmt), data_dtype=str(run_cfg.data_dtype))
 
     vocab = run_cfg.vocab_size
     if vocab is None:
@@ -60,7 +56,12 @@ def load_dataset(run_cfg: TrainConfig) -> DatasetState:
             vocab_size=None,
             tokenizer=str(run_cfg.tokenizer),
         )
-    vocab_i = _as_int(vocab, 0)
+    vocab_i = _as_int(vocab, None)
+    if vocab_i is None or vocab_i <= 0:
+        raise ValueError(
+            "Invalid configuration: `vocab_size` must be a positive integer (> 0). "
+            + f"Got run_cfg.vocab_size={run_cfg.vocab_size!r} (resolved vocab={vocab!r})."
+        )
 
     if isinstance(tokens, torch.Tensor):
         n_total = int(tokens.numel())

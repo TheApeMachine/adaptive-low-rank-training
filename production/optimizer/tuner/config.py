@@ -67,6 +67,7 @@ class KVSelfOptConfig:
 
     # Optional quality guard for policy tuning (slow).
     policy_quality: bool = False
+    trust_base_policy: bool = False
     calib_tokens: str | None = None
     calib_prefill: int = 128
     calib_decode_steps: int = 32

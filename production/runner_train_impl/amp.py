@@ -7,8 +7,7 @@ Why this exists:
 
 from __future__ import annotations
 
-import contextlib
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from typing import Protocol, cast
 
 import torch
@@ -65,22 +64,17 @@ def make_grad_scaler(*, enabled: bool) -> GradScalerLike | None:
         return None
 
 
-@contextlib.contextmanager
-def autocast_ctx(device: torch.device, *, enabled: bool, dtype: torch.dtype):
+def autocast_ctx(
+    device: torch.device, *, enabled: bool, dtype: torch.dtype
+) -> AbstractContextManager[None]:
     """Why: keep the training loop readable by hiding device-specific autocast branches."""
     if not enabled:
-        with nullcontext():
-            yield
-        return
+        return nullcontext()
     if device.type == "cuda":
-        with torch.autocast("cuda", dtype=dtype):
-            yield
-        return
+        return cast(AbstractContextManager[None], torch.autocast("cuda", dtype=dtype))
     if device.type == "mps":
-        with torch.autocast("mps", dtype=dtype):
-            yield
-        return
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        yield
+        return cast(AbstractContextManager[None], torch.autocast("mps", dtype=dtype))
+    # CPU autocast only supports bfloat16 in practice.
+    return cast(AbstractContextManager[None], torch.autocast("cpu", dtype=torch.bfloat16))
 
 

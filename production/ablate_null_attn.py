@@ -11,6 +11,7 @@ import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -77,6 +78,13 @@ def eval_nll_chunked(
         return float("nan")
 
     with torch.no_grad():
+        required_len = total_len + 1
+        actual_len = int(tokens_1d.shape[0])
+        if actual_len < required_len:
+            raise ValueError(
+                f"tokens_1d is too short for seq_len={total_len}: got len(tokens_1d)={actual_len}, "
+                + f"required >= {required_len}"
+            )
         ids = tokens_1d[: total_len + 1].to(device=device, dtype=torch.long).unsqueeze(0)  # (1, total_len+1)
         # predict next token for each position 0..total_len-1 (target is 1..total_len)
         inp = ids[:, :total_len]
@@ -108,10 +116,10 @@ def eval_nll_chunked(
 
 
 def _torch_load_obj(path: Path, *, map_location: torch.device) -> object:
-    fn = getattr(torch, "load", None)
-    if not callable(fn):
-        raise AttributeError("torch.load is required to load checkpoints.")
-    return fn(str(path), map_location=map_location)
+    try:
+        return cast(object, torch.load(str(path), map_location=map_location))
+    except Exception as e:
+        raise RuntimeError(f"Failed to torch.load checkpoint from {path}") from e
 
 
 def _as_state_dict(obj: object) -> dict[str, torch.Tensor]:
@@ -203,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     _ = ap.add_argument("--chunk-size", type=int, default=256)
     _ = ap.add_argument("--device", type=str, default=None)
     args_ns = ap.parse_args(argv)
-    args_map = as_str_object_dict(getattr(args_ns, "__dict__", None)) or {}
+    args_map = cast(dict[str, object], vars(args_ns) or {})
 
     ckpt = _as_str(args_map.get("ckpt", ""), "")
     tok_spec = _as_str(args_map.get("tokens", ""), "")

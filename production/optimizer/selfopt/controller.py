@@ -94,7 +94,7 @@ class SelfOptController:
         )
 
         # 2) Seq plan (runtime feasible; architectural max is cfg.block_size)
-        block_size = int(getattr(self.cfg, "block_size", 0) or 0)
+        block_size = int(self.cfg.block_size or 0)
         train_seq_len = int(max(2, min(block_size or int(train_seq_len_cap), int(train_seq_len_cap))))
         eval_seq_len = int(
             max(2, min(block_size or int(eval_seq_len_cap), int(eval_seq_len_cap), int(train_seq_len)))

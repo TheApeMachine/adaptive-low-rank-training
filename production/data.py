@@ -4,12 +4,13 @@ from dataclasses import dataclass
 import importlib
 import importlib.util
 import numbers
+import threading
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import torch
 
-from production.selfopt_cache import as_object_list, as_str_object_dict
+from production.selfopt_cache import as_str_object_dict
 
 
 @dataclass
@@ -32,6 +33,7 @@ _INT32_MIN_INCLUSIVE = 0
 # Track whether a loaded token array/tensor is safe to cast to int32 for embedding indices.
 # Keyed by id(tokens_any) because TokenView holds a reference to the loaded object.
 _TOKENS_INT32_SAFE: dict[int, bool] = {}
+_TOKENS_INT32_SAFE_LOCK = threading.Lock()
 
 
 @runtime_checkable
@@ -67,26 +69,17 @@ def _call1(fn: object, arg: object, *, what: str) -> object:
     return fn(arg)
 
 
-def _as_int(o: object, default: int) -> int:
+def _as_int(o: object) -> int:
     if isinstance(o, bool):
         return int(o)
     # numpy integer scalars and other integer-like objects
     if isinstance(o, numbers.Integral):
-        try:
-            return int(o)
-        except Exception:
-            return int(default)
-    if isinstance(o, int):
         return int(o)
     if isinstance(o, float):
         return int(o)
     if isinstance(o, str):
-        try:
-            return int(o.strip())
-        except ValueError:
-            return int(default)
-
-    return int(default)
+        return int(o.strip())
+    raise TypeError(f"Expected an int-like value, got {type(o).__name__}: {o!r}")
 
 
 def _token_id_min_max(tokens_any: object) -> tuple[int, int]:
@@ -106,7 +99,16 @@ def _token_id_min_max(tokens_any: object) -> tuple[int, int]:
     np_mod = _require_numpy()
     mn_obj = _np_call(np_mod, "min", tokens_any)
     mx_obj = _np_call(np_mod, "max", tokens_any)
-    return _as_int(mn_obj, 0), _as_int(mx_obj, 0)
+    try:
+        return _as_int(mn_obj), _as_int(mx_obj)
+    except (TypeError, ValueError) as e:
+        msg = (
+            "Failed to convert numpy min/max results to int token ids. "
+            f"mn_obj={mn_obj!r} (type={type(mn_obj).__name__}), "
+            f"mx_obj={mx_obj!r} (type={type(mx_obj).__name__}), "
+            f"tokens_any={tokens_any!r} (type={type(tokens_any).__name__})."
+        )
+        raise ValueError(msg) from e
 
 
 def _validate_token_ids_int32_range(*, tokens_any: object, source: Path) -> None:
@@ -131,7 +133,8 @@ def _record_int32_safety(*, tokens_any: object, source: Path) -> None:
     """
     mn, mx = _token_id_min_max(tokens_any)
     safe = (mn >= _INT32_MIN_INCLUSIVE) and (mx < _INT32_MAX_EXCLUSIVE)
-    _TOKENS_INT32_SAFE[id(tokens_any)] = bool(safe)
+    with _TOKENS_INT32_SAFE_LOCK:
+        _TOKENS_INT32_SAFE[id(tokens_any)] = bool(safe)
     if not safe:
         msg = (
             "[warn] token ids exceed int32 range for embedding indices; "
@@ -156,10 +159,7 @@ def infer_data_format(path: Path, data_format: str) -> str:
 
 
 def _torch_load_obj(path: Path) -> object:
-    fn = getattr(torch, "load", None)
-    if not callable(fn):
-        raise AttributeError("torch.load is required for .pt dataset loading.")
-    return fn(str(path), map_location="cpu")
+    return cast(object, torch.load(str(path), map_location="cpu"))
 
 
 def load_tokens_any(*, path: Path, fmt: str, data_dtype: str) -> object:
@@ -285,7 +285,8 @@ def get_batch_any(
         # Keep inputs compact for memory efficiency: embedding accepts int32/int64 indices;
         # using int32 saves ~50% memory vs int64. If any token id exceeds 2**31-1 (or is
         # negative), avoid the int32 cast to prevent overflow.
-        int32_safe = _TOKENS_INT32_SAFE.get(id(view.data))
+        with _TOKENS_INT32_SAFE_LOCK:
+            int32_safe = _TOKENS_INT32_SAFE.get(id(view.data))
         if int32_safe is False:
             x = x_raw.to(torch.long)
         elif int32_safe is True:
@@ -314,9 +315,11 @@ def get_batch_any(
         raise TypeError("Non-torch token container must support __getitem__.")
 
     offs_np = _offs_cache_np.get(int(block_size))
-    shape_obj = getattr(offs_np, "shape", None) if offs_np is not None else None
-    shape_list = as_object_list(shape_obj)
-    shape0 = _as_int(shape_list[0], 0) if shape_list is not None and len(shape_list) > 0 else 0
+    shape0: int | None = None
+    if offs_np is not None:
+        shape_obj = getattr(offs_np, "shape", None)
+        if isinstance(shape_obj, tuple) and shape_obj and isinstance(shape_obj[0], numbers.Integral):
+            shape0 = int(shape_obj[0])
     if offs_np is None or shape0 != int(block_size):
         int64_t = _np_attr(np_mod, "int64")
         offs_np = _np_call(np_mod, "arange", int(block_size), dtype=int64_t)
@@ -343,7 +346,8 @@ def get_batch_any(
     # Keep inputs compact for memory efficiency: embedding accepts int32/int64 indices; using
     # int32 saves ~50% memory vs int64. If any token id exceeds 2**31-1 (or is negative),
     # avoid the int32 cast to prevent overflow.
-    int32_safe = _TOKENS_INT32_SAFE.get(id(view.data))
+    with _TOKENS_INT32_SAFE_LOCK:
+        int32_safe = _TOKENS_INT32_SAFE.get(id(view.data))
     if int32_safe is False:
         x_np = _np_call(np_mod, "asarray", view.data[idx_np], dtype=int64_t)
     elif int32_safe is True:
@@ -351,8 +355,8 @@ def get_batch_any(
         x_np = _np_call(np_mod, "asarray", view.data[idx_np], dtype=int32_t)
     else:
         x64 = _np_call(np_mod, "asarray", view.data[idx_np], dtype=int64_t)
-        mn = _as_int(_np_call(np_mod, "min", x64), 0)
-        mx = _as_int(_np_call(np_mod, "max", x64), 0)
+        mn = _as_int(_np_call(np_mod, "min", x64))
+        mx = _as_int(_np_call(np_mod, "max", x64))
         if mn < _INT32_MIN_INCLUSIVE or mx >= _INT32_MAX_EXCLUSIVE:
             msg = (
                 "[warn] batch contains token ids outside int32 range; "

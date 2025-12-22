@@ -2,22 +2,57 @@
 
 from __future__ import annotations
 
+import logging
+from typing import cast
+
 import torch
 
 from production.selfopt_utils import device_sig
 
 from production.optimizer.tuner.buckets import pow2_bucket
 
+_LOG = logging.getLogger(__name__)
 
 def _get_int_attr(o: object, name: str, default: int) -> int:
-    v = getattr(o, name, None)
+    """Fetch an attribute and coerce it to int for stable key construction.
+
+    Behavior:
+    - bool -> int(bool)
+    - int -> returned as-is
+    - float -> truncated via int(float)
+    - str -> attempts int(str); on failure logs a warning and returns default
+    - None -> returns default
+    - other types -> logs a warning and returns default
+    """
+    v = cast(object | None, getattr(o, name, None))
     if isinstance(v, bool):
         return int(v)
     if isinstance(v, int):
-        return int(v)
+        return v
     if isinstance(v, float):
         return int(v)
-    return int(default)
+    if isinstance(v, str):
+        try:
+            return int(v)
+        except ValueError:
+            _LOG.warning(
+                "Expected %s.%s to be int-like; got non-numeric string %r. Using default=%d.",
+                type(o).__name__,
+                name,
+                v,
+                default,
+            )
+            return default
+    if v is not None:
+        _LOG.warning(
+            "Expected %s.%s to be int-like; got %s (%r). Using default=%d.",
+            type(o).__name__,
+            name,
+            type(v).__name__,
+            v,
+            default,
+        )
+    return default
 
 
 def attn_mode_value(model_cfg: object) -> str:

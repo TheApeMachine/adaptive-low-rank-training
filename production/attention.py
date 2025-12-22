@@ -14,9 +14,10 @@ from production.attention_impl.decoupled_attention import (
     neg_inf,
 )
 
-# Back-compat aliases (older tests/bench harnesses expect underscore-prefixed helpers).
+# Backwards-compatible aliases (some older tests/code import these underscored names).
 _decoupled_qk_cat = decoupled_qk_cat
 _decoupled_scores_f32 = decoupled_scores_f32
+
 
 __all__ = [
     "TRITON_AVAILABLE",

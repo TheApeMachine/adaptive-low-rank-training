@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+from collections.abc import Callable
+from typing import cast
 import torch
 
 from production.dataset.base import Dataset
@@ -29,13 +31,8 @@ def _np_call(np_mod: object, name: str, *args: object, **kwargs: object) -> obje
 
 
 def _torch_from_numpy(o: object) -> torch.Tensor:
-    fn = getattr(torch, "from_numpy", None)
-    if not callable(fn):
-        raise AttributeError("torch.from_numpy is required for NPYDataset")
-    t_obj = fn(o)
-    if not isinstance(t_obj, torch.Tensor):
-        raise TypeError("torch.from_numpy did not return torch.Tensor")
-    return t_obj
+    from_numpy = cast(Callable[[object], torch.Tensor], torch.from_numpy)
+    return from_numpy(o)
 
 
 class NPYDataset(Dataset):
@@ -54,4 +51,8 @@ class NPYDataset(Dataset):
             raise TypeError("Expected numpy array to support .reshape(...)")
         arr = reshape(-1)
         t = _torch_from_numpy(arr).to(dtype=torch.long)
+        flags = getattr(arr, "flags", None)
+        writeable = bool(getattr(flags, "writeable", True))
+        if not writeable:
+            t = t.clone()
         super().__init__(t, int(block_size))

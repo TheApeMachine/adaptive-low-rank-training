@@ -18,10 +18,11 @@ Requirements:
 """
 
 import argparse
-import os
 import gc
 import importlib
 import importlib.util
+import os
+import sys
 from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 import numpy as np
@@ -194,6 +195,7 @@ def download_and_tokenize(
     mm_writer: np.memmap | None = None
     txt_writer: _TextWriter | None = None
     write_pos = 0
+    wrote_any_text_tokens = False
 
     print("Tokenizing documents...")
     pbar = _pbar_new(total=target_tokens, desc="Tokens")
@@ -254,6 +256,9 @@ def download_and_tokenize(
             else:
                 if txt_writer is None:
                     raise RuntimeError("text writer not initialized")
+                # Separator only between documents; avoid a trailing space at end-of-file.
+                if wrote_any_text_tokens:
+                    _ = txt_writer.write(" ")
                 # Write as space-separated integers (streaming)
                 # Avoid huge join by chunking.
                 chunk_size = 100_000
@@ -262,7 +267,7 @@ def download_and_tokenize(
                     _ = txt_writer.write(" ".join(map(str, chunk)))
                     if i + chunk_size < take:
                         _ = txt_writer.write(" ")
-                _ = txt_writer.write(" ")
+                wrote_any_text_tokens = True
 
             total_tokens += take
             doc_count += 1
@@ -279,12 +284,30 @@ def download_and_tokenize(
 
     except KeyboardInterrupt:
         print("\nInterrupted! Saving collected tokens...")
+    finally:
+        # Ensure writers are flushed/closed before any truncation/reading logic below.
+        if mm_writer is not None:
+            try:
+                mm_writer.flush()
+            except (OSError, ValueError, AttributeError, TypeError):
+                pass
+            del mm_writer
+            mm_writer = None
+        if txt_writer is not None:
+            try:
+                txt_writer.flush()
+            except (OSError, ValueError, AttributeError, TypeError):
+                pass
+            try:
+                txt_writer.close()
+            except (OSError, ValueError, AttributeError, TypeError):
+                pass
+            txt_writer = None
+        _pbar_close(pbar)
 
     # Explicit cleanup to avoid Bad file descriptor errors from background threads
     del dataset
     _ = gc.collect()
-
-    _pbar_close(pbar)
 
     # Finalize writer
     if output_format == "npy":
@@ -306,16 +329,6 @@ def download_and_tokenize(
             del mm_out_obj
             del mm_in_obj
             os.replace(tmp_path, output_path)
-    else:
-        if txt_writer is not None:
-            try:
-                txt_writer.flush()
-            except (OSError, ValueError, AttributeError, TypeError):
-                pass
-            try:
-                txt_writer.close()
-            except (OSError, ValueError, AttributeError, TypeError):
-                pass
 
     print(f"\nCollected {int(total_tokens):,} tokens from {doc_count:,} documents")
     print(f"Saved to {output_path}")
@@ -369,7 +382,7 @@ def verify_existing(path: str) -> int | None:
         return tokens
 
 
-def main() -> int | None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare FineWeb-Edu dataset")
     _ = parser.add_argument(
         "--tokens",
@@ -431,7 +444,7 @@ def main() -> int | None:
             print(f"File {output_path} already exists with {existing:,} tokens")
             if existing >= target_tokens:
                 print("Sufficient tokens already available. Use --force to re-download.")
-                return
+                return 0
             else:
                 print(f"Need {target_tokens - existing:,} more tokens. Re-downloading...")
 
@@ -451,10 +464,11 @@ def main() -> int | None:
         print("      --tokenizer tiktoken \\")
         print("      --block 1024 \\")
         print("      --instrument medium")
+        return 0
     else:
         print("\nFailed to prepare dataset")
         return 1
 
 
 if __name__ == "__main__":
-    _ = main()
+    sys.exit(main())

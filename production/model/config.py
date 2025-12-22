@@ -38,7 +38,7 @@ class ModelConfig:
     same time grouping some of the easier self-optimization steps.
     """
 
-    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
+    device: torch.device | str | None = field(default_factory=lambda: torch.device("cpu"))
 
     vocab_size: int = 0
     block_size: int = 0
@@ -81,13 +81,13 @@ class ModelConfig:
     def __post_init__(self) -> None:
         # Normalize device inputs (some checkpoints store device as string).
         dev = self.device
-        if isinstance(dev, str):
+        if dev is None:
+            self.device = torch.device("cpu")
+        else:
             try:
-                self.device = torch.device(str(dev))
+                self.device = torch.device(dev)
             except (TypeError, ValueError):
                 self.device = torch.device("cpu")
-        elif not torch.device:
-            self.device = torch.device("cpu")
 
         # Normalize mode strings / enum values.
         self.attn_mode = _normalize_attn_mode(self.attn_mode)
@@ -247,8 +247,13 @@ class ModelConfig:
         # Step 2: Entropy signals (data-driven ratios)
         v: float = math.log2(float(self.vocab_size) + 1.0)
         b: float = math.log2(float(self.block_size) + 1.0)
-        task: float = v / (v + b)  # lexical dominance
-        ctx: float = b / (v + b)   # context dominance
+        denom: float = v + b
+        if (not math.isfinite(denom)) or abs(denom) <= 1e-12:
+            task = 0.5
+            ctx = 0.5
+        else:
+            task = v / denom
+            ctx = b / denom
 
         target_head_dim: int = int(round(64.0 + 64.0 * task))
         mlp_ratio: float = 2.5 + 3.5 * task
@@ -441,9 +446,14 @@ class ModelConfig:
 def _normalize_attn_mode(mode: object) -> str:
     """Best-effort normalization of attention mode inputs (strings, enums)."""
     v = getattr(mode, "value", mode)
-    s = str(v or "").strip().lower()
+    # Treat `None` as "unset"; preserve falsy-but-meaningful values (0/False) by not using `v or ""`.
+    s = "" if v is None else str(v).strip().lower()
+    if s == "":
+        return "bottleneck"
     if s in ("baseline", "standard", "base"):
         return "standard"
     if s in ("gqa", "bottleneck", "decoupled"):
         return s
-    return "bottleneck"
+    raise ValueError(
+        f'Unknown attn_mode={v!r} (normalized={s!r}). Accepted aliases: ("standard"/"baseline"/"base"), ("gqa"/"bottleneck"/"decoupled").'
+    )

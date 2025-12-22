@@ -19,6 +19,8 @@ import torch
 import torch.nn.functional as F
 from production.console import get_console
 from production.data import TokenView
+from production.model import GPT, ModelConfig
+from production.optimizer.counts import CountCodec
 from production.run_config import TrainConfig
 from production.selfopt_logging import SelfOptLogger
 
@@ -32,7 +34,6 @@ from production.runner_train_impl.schedule import lr_for_step
 from production.runner_train_impl.summary import print_summary
 from production.selfopt_controller import RuntimePlan, SelfOptController
 import production.data as data_mod
-from production.model import GPT, ModelConfig
 
 
 class _TrainModel(Protocol):
@@ -93,7 +94,7 @@ class Trainer:
 
         train_view = cast(TokenView, data_state.train_view)
         val_view = cast(TokenView, data_state.val_view)
-        cfg = self._build_model_cfg(vocab_size=data_state.vocab_size)
+        cfg = self._build_model_cfg(vocab_size=data_state.vocab_size, n_total_tokens=data_state.n_total_tokens)
 
         self._write_resolved_config(cfg)
 
@@ -204,7 +205,13 @@ class Trainer:
                 ck = load_checkpoint(str(resume_path))
                 if ck is not None:
                     try:
-                        _ = model.load_state_dict(ck.model_state, strict=False)
+                        load_result = model.load_state_dict(ck.model_state, strict=False)
+                        missing = cast(list[str], getattr(load_result, "missing_keys", []))
+                        unexpected = cast(list[str], getattr(load_result, "unexpected_keys", []))
+                        if missing or unexpected:
+                            console.print(
+                                f"[warn] Resume checkpoint key mismatch - missing: {len(missing)}, unexpected: {len(unexpected)}"
+                            )
                         opt.load_state_dict(ck.optim_state)
                         # `opt_step` is "completed steps", so it is the next step index.
                         start_step = int(max(0, ck.opt_step))
@@ -271,7 +278,7 @@ class Trainer:
         _ = model.train()
 
         # Runtime LR adaptation state
-        loss_history: list[float] = []
+        loss_history: list[torch.Tensor] = []
         lr_multiplier: float = 1.0
         adapt_window: int = 50  # window for loss variance measurement
         adapt_every: int = 20   # check every N steps
@@ -338,11 +345,17 @@ class Trainer:
             dt = time.perf_counter() - t0
 
             # Track loss for runtime adaptation (on-device, defer sync)
-            loss_history.append(float(loss_sum_t.item() * float(inv_ga)))
+            # Store detached tensor; conversion to float happens only when needed
+            loss_history.append((loss_sum_t * inv_ga).detach())
+            # Bound memory growth: keep only the recent window plus slack
+            loss_history = loss_history[-(adapt_window + 10):]
 
             # Runtime LR adaptation: adjust based on loss curvature/variance
-            if step > adapt_window and step % adapt_every == 0:
-                recent_losses = loss_history[-adapt_window:]
+            # NOTE: Use recorded loss count as the trigger (not `step`) so resume-from-checkpoint
+            # doesn't immediately run adaptation with an empty history.
+            if len(loss_history) > adapt_window and step % adapt_every == 0:
+                # Convert to float only when adaptation logic runs
+                recent_losses = [float(t.item()) for t in loss_history[-adapt_window:]]
                 if len(recent_losses) >= adapt_window:
                     mean_loss = sum(recent_losses) / len(recent_losses)
                     variance = sum((l - mean_loss) ** 2 for l in recent_losses) / len(recent_losses)
@@ -352,25 +365,29 @@ class Trainer:
                     # Low variance + plateau → increase LR slightly (can push harder)
                     # Loss spiking → reduce LR aggressively
 
+                    # Only evaluate deeper multiplier logic once we've accumulated enough *new*
+                    # samples post-resume, and ensure the slice is the intended length.
                     if len(loss_history) >= adapt_window + 10:
-                        prev_window = loss_history[-(adapt_window + 10):-10]
-                        prev_mean = sum(prev_window) / len(prev_window)
-                        improvement = (prev_mean - mean_loss) / max(prev_mean, 1e-9)
+                        prev_window = loss_history[-(adapt_window + 10) :]
+                        if len(prev_window) == adapt_window + 10:
+                            prev_losses = [float(t.item()) for t in prev_window[:-10]]
+                            prev_mean = sum(prev_losses) / len(prev_losses)
+                            improvement = (prev_mean - mean_loss) / max(prev_mean, 1e-9)
 
-                        # Loss plateau (< 0.5% improvement) and low variance → can push harder
-                        if improvement < 0.005 and rel_variance < 0.01:
-                            lr_multiplier = min(1.5, lr_multiplier * 1.05)
-                        # High variance (noisy gradients) → smooth it out
-                        elif rel_variance > 0.05:
-                            lr_multiplier = max(0.5, lr_multiplier * 0.95)
-                        # Loss spike (negative improvement) → back off
-                        elif improvement < -0.01:
-                            lr_multiplier = max(0.5, lr_multiplier * 0.85)
+                            # Loss plateau (< 0.5% improvement) and low variance → can push harder
+                            if improvement < 0.005 and rel_variance < 0.01:
+                                lr_multiplier = min(1.5, lr_multiplier * 1.05)
+                            # High variance (noisy gradients) → smooth it out
+                            elif rel_variance > 0.05:
+                                lr_multiplier = max(0.5, lr_multiplier * 0.95)
+                            # Loss spike (negative improvement) → back off
+                            elif improvement < -0.01:
+                                lr_multiplier = max(0.5, lr_multiplier * 0.85)
 
             if log_every > 0 and (step % log_every == 0):
                 # Sync only when we actually need host-visible metrics (printing).
-                # Note: loss_history already has the value, so we can skip re-computing
-                loss_avg = loss_history[-1] if loss_history else 0.0
+                # Convert tensor to float only when logging
+                loss_avg = float(loss_history[-1].item()) if loss_history else 0.0
                 tok_s = float(tok_per_step) / float(max(1e-9, dt))
                 # Show adaptive LR multiplier when it's active
                 lr_info = f"lr={lr:.3g}"
@@ -448,7 +465,37 @@ class Trainer:
         """Why: isolate model construction so dtype/compile planning can wrap it cleanly."""
         return GPT(cfg).to(self.device)
 
-    def _build_model_cfg(self, *, vocab_size: int) -> ModelConfig:
+    def _compute_target_params(self, *, n_total_tokens: int) -> int:
+        """
+        Compute target model parameter count.
+
+        Why: unify direct size overrides (--size) and dataset-derived sizing (Chinchilla-style)
+        into a single computed value, rather than expecting it as a CLI arg.
+
+        Logic mirrors production/optimizer/apply_impl/target_params.py:TargetParamsDeriver.apply
+        """
+        # First, check for explicit --size argument
+        size_raw: object | None = getattr(self.args, "size", None)
+        if size_raw is not None:
+            # Parse size string (e.g., "100m", "1b", "1.5b")
+            size = CountCodec.parse(size_raw)
+            if size is None:
+                raise ValueError(f"Unparseable --size {size_raw!r}. Use e.g. 100m, 1b, 1.5b, 2e9.")
+            return int(size)
+
+        # Otherwise, derive from dataset tokens using Chinchilla heuristic (tokens ≈ 20 × params)
+        if n_total_tokens <= 0:
+            raise ValueError(
+                "Could not infer dataset token count. "
+                + "Name dataset like `fineweb_20b.npy`, provide a sibling `.meta` with `tokens: ...`, "
+                + "or pass `--size` explicitly."
+            )
+
+        tokens_per_param = 20.0
+        target_params = int(max(1.0, float(n_total_tokens) / tokens_per_param))
+        return target_params
+
+    def _build_model_cfg(self, *, vocab_size: int, n_total_tokens: int) -> ModelConfig:
         """Why: translate TrainConfig fields into the model's config object."""
 
         cfg = ModelConfig(device=self.device)
@@ -466,7 +513,9 @@ class Trainer:
         cfg.rope = (not bool(self.run_cfg.no_rope))
 
         # Budget-aware auto-sizing: target_params derived from dataset tokens (Chinchilla-style)
-        target_params: int = int(cast(int, getattr(self.args, "target_params")))
+        # or explicit --size argument. Compute it here rather than relying on self.args.target_params
+        # which may not exist (and should be computed, not CLI-provided).
+        target_params: int = self._compute_target_params(n_total_tokens=n_total_tokens)
         cfg.optimize(target_params)
 
         # Apply experiment-specific overrides (presets/CLI) after auto-sizing

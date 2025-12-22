@@ -243,8 +243,7 @@ class TestChooseKVCachePolicyHelper(unittest.TestCase):
 
         with (
             patch("production.model.KVCachePolicySelfOptimizer", _StubPolicyTuner),
-            patch.object(m, "_policy_quality_metrics_decoupled", side_effect=_qm_side_effect),
-            patch.object(m, "_policy_quality_metrics_decoupled_layerwise") as layerwise_mock,
+            patch.object(m, "_policy_quality_metrics_decoupled", side_effect=_qm_side_effect) as qm_mock,
         ):
             k_sem2, k_geo2, v_dec2, promote, kv_res2 = m._choose_kv_cache_policy(
                 model=m,
@@ -268,7 +267,7 @@ class TestChooseKVCachePolicyHelper(unittest.TestCase):
         self.assertIsNone(promote)
         self.assertEqual(kv_res2, int(policy_b.residual_len))
         # Should not attempt layerwise promotion since a global policy passed long gate.
-        layerwise_mock.assert_not_called()
+        self.assertTrue(all(c.kwargs.get("promote_layers", None) in (None, 0) for c in qm_mock.call_args_list))
 
     def test_layerwise_speculative_print_and_promote(self) -> None:
         m = _make_small_gpt(n_layer=4)
@@ -298,10 +297,16 @@ class TestChooseKVCachePolicyHelper(unittest.TestCase):
             return ["reject"] if call_count["n"] == 1 else []
 
         buf = io.StringIO()
+
+        def _qm_layerwise_side_effect(*args, **kwargs):
+            promote_layers = kwargs.get("promote_layers", None)
+            if promote_layers is not None and int(promote_layers) > 0:
+                return {"max_abs_logit": 0.0}
+            return {"max_abs_logit": 999.0}
+
         with (
             patch("production.model.KVCachePolicySelfOptimizer", _StubPolicyTuner),
-            patch.object(m, "_policy_quality_metrics_decoupled", return_value={"max_abs_logit": 999.0}),
-            patch.object(m, "_policy_quality_metrics_decoupled_layerwise", return_value={"max_abs_logit": 0.0}),
+            patch.object(m, "_policy_quality_metrics_decoupled", side_effect=_qm_layerwise_side_effect),
             patch("production.model.policy_quality_reject_reasons", side_effect=_reject_side_effect),
             redirect_stdout(buf),
         ):

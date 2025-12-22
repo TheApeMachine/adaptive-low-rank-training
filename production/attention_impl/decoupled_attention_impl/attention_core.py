@@ -37,12 +37,19 @@ if TYPE_CHECKING:
 def _normalize_attn_mode(mode: object) -> str:
     """Normalize mode inputs to canonical strings ("standard","gqa","bottleneck","decoupled")."""
     v = getattr(mode, "value", mode)
-    s = str(v or "").strip().lower()
+    # Treat `None` as "unset"; preserve falsy-but-meaningful values (0/False) by not using `v or ""`.
+    s = "" if v is None else str(v).strip().lower()
+    if s == "":
+        raise ValueError(
+            f'attn_mode is unset/empty (got {v!r}). Expected one of: "standard" (aliases: "baseline","base"), "gqa", "bottleneck", "decoupled".'
+        )
     if s in ("baseline", "standard", "base"):
         return "standard"
     if s in ("gqa", "bottleneck", "decoupled"):
         return s
-    return "bottleneck"
+    raise ValueError(
+        f'Unknown attn_mode={v!r} (normalized={s!r}). Accepted aliases: ("standard"/"baseline"/"base"), ("gqa"/"bottleneck"/"decoupled").'
+    )
 
 
 class _Kernel(Protocol):

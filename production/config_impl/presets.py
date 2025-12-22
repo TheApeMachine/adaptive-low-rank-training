@@ -9,6 +9,7 @@ Why this exists:
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import sys
 
@@ -17,6 +18,8 @@ from production.selfopt_cache import as_str_object_dict
 
 # Bottleneck/decoupled KV reduction target (d_model / attn_dim).
 _BOTTLENECK_RATIO: float = 5.3333333333
+
+_LOG = logging.getLogger(__name__)
 
 
 def _round_up(x: float, multiple: int) -> int:
@@ -83,15 +86,20 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
 
     # Training hyperparameter overrides (used for controlled sweeps in the manifest).
     if "lr" in preset:
+        lr_obj = preset["lr"]
         try:
-            lr_obj = preset["lr"]
             lr = float(str(lr_obj))
             args.lr = float(lr)
             # Keep min_lr consistent unless explicitly set elsewhere.
-            if not hasattr(args, "min_lr"):
+            if not _argv_has_flag("--min-lr"):
                 args.min_lr = float(lr) * 0.1
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as e:
+            _LOG.warning(
+                "Failed to apply preset '%s' override for key 'lr': lr=%r (%s). Leaving args.lr/min_lr unchanged.",
+                exp,
+                lr_obj,
+                str(e),
+            )
 
     # attn_mode
     if not _argv_has_flag("--attn-mode") and "attn_mode" in preset:

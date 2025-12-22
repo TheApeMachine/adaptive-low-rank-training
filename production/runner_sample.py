@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 
 import torch
@@ -17,11 +18,18 @@ KVCacheKind = Literal["fp16", "fp32", "q8_0", "q4_0", "nf4"]
 
 def _torch_load_obj(path: str, *, device: torch.device) -> object:
     # `torch.load` is typed as returning `Any` in stubs; isolate it behind an `object` boundary.
+    # Security: prefer `weights_only=True` (PyTorch >= 1.13) to avoid executing arbitrary code via pickle
+    # when loading untrusted checkpoints. Older PyTorch versions don't support it and will fall back.
+    if "weights_only" in inspect.signature(torch.load).parameters:
+        return torch.load(str(path), map_location=device, weights_only=True)  # pyright: ignore[reportAny]
     return torch.load(str(path), map_location=device)  # pyright: ignore[reportAny]
 
 
 def _as_kvcache_kind_typed(o: object) -> KVCacheKind:
+    allowed_nondefault: tuple[str, ...] = ("fp32", "q8_0", "q4_0", "nf4")
     s = str(o or "").strip()
+    if s == "" or s == "fp16":
+        return "fp16"
     if s == "fp32":
         return "fp32"
     if s == "q8_0":
@@ -30,16 +38,21 @@ def _as_kvcache_kind_typed(o: object) -> KVCacheKind:
         return "q4_0"
     if s == "nf4":
         return "nf4"
-    return "fp16"
+    allowed_str = ", ".join(allowed_nondefault)
+    raise ValueError(f"Invalid kv_cache kind {s!r}. Allowed: {allowed_str} (or empty/None for default 'fp16').")
 
 
 def _as_kvcache_kind_opt(o: object) -> KVCacheKind | None:
     if o is None:
         return None
     s = str(o).strip()
+    if s == "":
+        return None
     if s in ("fp16", "fp32", "q8_0", "q4_0", "nf4"):
         return _as_kvcache_kind_typed(s)
-    return None
+    raise ValueError(
+        f"Invalid kv_cache override kind {s!r}. Allowed: fp16, fp32, q8_0, q4_0, nf4 (or empty/None to disable override)."
+    )
 
 
 def _as_state_dict(o: object) -> dict[str, torch.Tensor] | None:
@@ -98,8 +111,15 @@ def run_sample(*, args: argparse.Namespace, device: torch.device, self_opt: KVSe
     inc = model.load_state_dict(sd, strict=False)
     missing = _as_str_list(getattr(inc, "missing_keys", []))
     unexpected = _as_str_list(getattr(inc, "unexpected_keys", []))
-    bad_missing = [k for k in missing if "decoupled_gate_logit" not in k]
-    bad_unexpected = [k for k in unexpected if "decoupled_gate_logit" not in k]
+    # Allow known, intentional checkpoint mismatches:
+    # - `decoupled_gate_logit`: introduced after earlier checkpoints.
+    # - `*.rotary.*`: RotaryEmbedding is a plain Python object (not an nn.Module), so it does not
+    #   participate in module registration or `state_dict()` anymore.
+    def _is_allowed_ckpt_mismatch(k: str) -> bool:
+        return ("decoupled_gate_logit" in k) or (".rotary." in k) or k.endswith(".rotary") or k.endswith(".rotary.inv_freq")
+
+    bad_missing = [k for k in missing if not _is_allowed_ckpt_mismatch(k)]
+    bad_unexpected = [k for k in unexpected if not _is_allowed_ckpt_mismatch(k)]
     if bad_missing or bad_unexpected:
         _ = model.load_state_dict(sd, strict=True)
     if missing or unexpected:
@@ -177,8 +197,8 @@ def run_sample(*, args: argparse.Namespace, device: torch.device, self_opt: KVSe
             incompatible_d = draft.load_state_dict(dsd, strict=False)
             mk = _as_str_list(getattr(incompatible_d, "missing_keys", []))
             uk = _as_str_list(getattr(incompatible_d, "unexpected_keys", []))
-            bad_missing_d = [k for k in mk if "decoupled_gate_logit" not in k]
-            bad_unexpected_d = [k for k in uk if "decoupled_gate_logit" not in k]
+            bad_missing_d = [k for k in mk if not _is_allowed_ckpt_mismatch(k)]
+            bad_unexpected_d = [k for k in uk if not _is_allowed_ckpt_mismatch(k)]
             if bad_missing_d or bad_unexpected_d:
                 _ = draft.load_state_dict(dsd, strict=True)
             if mk or uk:

@@ -122,6 +122,7 @@ class Policy:
         T = int(tokens.size(1))
         if T < 2:
             return False
+        B = int(tokens.size(0))
 
         if long:
             pre = int(getattr(self_opt, "calib_long_prefill", 4096))
@@ -161,7 +162,7 @@ class Policy:
         base_c = [
             Cache.build_layer(
                 self.cfg,
-                1,
+                B,
                 pre + dec,
                 tokens.device,
                 k_sem=fp16,
@@ -173,7 +174,7 @@ class Policy:
         test_c = [
             Cache.build_layer(
                 self.cfg,
-                1,
+                B,
                 pre + dec,
                 tokens.device,
                 k_sem=_build(ks, i),
@@ -184,31 +185,23 @@ class Policy:
         ]
 
         history: list[dict[str, float]] = []
-        # Return of forward is tuple[Tensor, list[Any] | None]
-        res_b = cast(
-            tuple[torch.Tensor, list[DecoupledLayerKVCache | LayerKVCache]],
-            self.model.forward(tokens[:, :pre], caches=base_c)
-        )
-        lb = res_b[0]
-        res_t = cast(
-            tuple[torch.Tensor, list[DecoupledLayerKVCache | LayerKVCache]],
-            self.model.forward(tokens[:, :pre], caches=test_c)
-        )
-        lt = res_t[0]
+        with torch.inference_mode():
+            res_b = self.model.forward(tokens[:, :pre], caches=base_c)
+            lb, base_c2 = res_b[0], res_b[1]
+            base_c = base_c2 or base_c
+            res_t = self.model.forward(tokens[:, :pre], caches=test_c)
+            lt, test_c2 = res_t[0], res_t[1]
+            test_c = test_c2 or test_c
 
-        for i in range(pre, pre + dec):
-            x = tokens[:, i:i+1]
-            res_b = cast(
-                tuple[torch.Tensor, list[DecoupledLayerKVCache | LayerKVCache]],
-                self.model.forward(x, caches=base_c, pos_offset=i)
-            )
-            lb, base_c = res_b[0], res_b[1]
-            res_t = cast(
-                tuple[torch.Tensor, list[DecoupledLayerKVCache | LayerKVCache]],
-                self.model.forward(x, caches=test_c, pos_offset=i)
-            )
-            lt, test_c = res_t[0], res_t[1]
-            history.append(Metrics.compare(lb, lt, tokens[:, i+1], compute_kl=bool(compute_kl)))
+            for i in range(pre, pre + dec):
+                x = tokens[:, i:i+1]
+                res_b = self.model.forward(x, caches=base_c, pos_offset=i)
+                lb, base_c2 = res_b[0], res_b[1]
+                base_c = base_c2 or base_c
+                res_t = self.model.forward(x, caches=test_c, pos_offset=i)
+                lt, test_c2 = res_t[0], res_t[1]
+                test_c = test_c2 or test_c
+                history.append(Metrics.compare(lb, lt, tokens[:, i+1], compute_kl=bool(compute_kl)))
 
         agg = {
             "delta_nll": sum(h["delta_nll"] for h in history) / len(history),

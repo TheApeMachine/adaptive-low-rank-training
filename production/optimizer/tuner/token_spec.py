@@ -39,7 +39,9 @@ def load_token_ids_spec(spec: str) -> list[int]:
     if os.path.exists(s):
         if p.suffix == ".npy":
             np_mod = _require_numpy()
-            arr = _np_call(np_mod, "load", str(p), mmap_mode="r")
+            # We convert the loaded array to a Python list[int] below, so using
+            # mmap_mode="r" would be redundant (materialization happens anyway).
+            arr = _np_call(np_mod, "load", str(p))
             asarray = _np_attr(np_mod, "asarray")
             if not callable(asarray):
                 raise AttributeError("numpy.asarray is required")
@@ -64,10 +66,16 @@ def load_token_ids_spec(spec: str) -> list[int]:
                         if isinstance(o, int):
                             return int(o)
                         if isinstance(o, float):
+                            if not o.is_integer():
+                                raise TypeError(
+                                    f"token id float must be a whole number, got {o!r}"
+                                )
                             return int(o)
                         if isinstance(o, str):
                             return int(o.strip())
-                        raise TypeError("token id must be int-like")
+                        raise TypeError(
+                            f"token id must be int-like, got {o!r} (type {type(o).__name__})"
+                        )
 
                     return [_as_int(x) for x in lst2]
             raise TypeError("Unable to convert .npy token spec to list[int]")

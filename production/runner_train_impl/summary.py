@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import traceback
 from typing import Protocol, runtime_checkable
 
 from production.console import get_console, rich_enabled
@@ -63,6 +64,14 @@ class _RichTable(Protocol):
     def add_column(self, *args: object, **kwargs: object) -> object: ...
 
     def add_row(self, *args: object, **kwargs: object) -> object: ...
+
+
+def _debug_enabled() -> bool:
+    v = str(os.environ.get("SUMMARY_DEBUG", "")).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    v2 = str(os.environ.get("DEBUG", "")).strip().lower()
+    return v2 in ("1", "true", "yes", "on")
 
 
 def print_summary(*, args: object, device: object, cfg: object, n_total_tokens: int) -> None:
@@ -137,7 +146,7 @@ def print_summary(*, args: object, device: object, cfg: object, n_total_tokens: 
                     _ = t.add_row(
                         "traincfg",
                         (
-                            f"steps={getattr(args, 'steps', None)}  "
+                            f"steps={_fmt_int(getattr(args, 'steps', None))}  "
                             f"lr={_fmt_float(getattr(args, 'lr', None))}  "
                             f"wd={_fmt_float(getattr(args, 'weight_decay', None))}  "
                             f"opt={str(getattr(args, 'optimizer', ''))}  "
@@ -158,8 +167,14 @@ def print_summary(*, args: object, device: object, cfg: object, n_total_tokens: 
         console.print(f"[data] n_tokens={_fmt_int(n_total_tokens)}", flush=True)
         console.print(f"[model] block={_fmt_int(getattr(cfg, 'block_size', 0))} d_model={_fmt_int(getattr(cfg, 'd_model', 0))} n_head={_fmt_int(getattr(cfg, 'n_head', 0))} head_dim={_fmt_int(head_dim)} d_ff={_fmt_int(getattr(cfg, 'd_ff', 0))} embed_dim={_fmt_int(getattr(cfg, 'embed_dim', 0))}", flush=True)
         console.print(f"[attn] mode={str(getattr(cfg, 'attn_mode', ''))} attn_dim={_fmt_int(getattr(cfg, 'attn_dim', 0))} sem_dim={_fmt_int(getattr(cfg, 'sem_dim', 0))} geo_dim={_fmt_int(getattr(cfg, 'geo_dim', 0))} rope={_fmt_int(int(bool(getattr(cfg, 'rope', False))))} tie_qk={_fmt_int(int(bool(getattr(cfg, 'tie_qk', False))))} null_attn={_fmt_int(int(bool(getattr(cfg, 'null_attn', False))))}", flush=True)
-        console.print(f"[traincfg] steps={getattr(args, 'steps', None)} lr={_fmt_float(getattr(args, 'lr', None))} wd={_fmt_float(getattr(args, 'weight_decay', None))} opt={str(getattr(args, 'optimizer', ''))} sched={str(getattr(args, 'lr_schedule', ''))} warmup={_fmt_int(getattr(args, 'warmup_steps', None))} min_lr={_fmt_float(getattr(args, 'min_lr', None))}", flush=True)
-    except (OSError, UnicodeEncodeError, AttributeError, TypeError, ValueError):
-        pass
+        console.print(f"[traincfg] steps={_fmt_int(getattr(args, 'steps', None))} lr={_fmt_float(getattr(args, 'lr', None))} wd={_fmt_float(getattr(args, 'weight_decay', None))} opt={str(getattr(args, 'optimizer', ''))} sched={str(getattr(args, 'lr_schedule', ''))} warmup={_fmt_int(getattr(args, 'warmup_steps', None))} min_lr={_fmt_float(getattr(args, 'min_lr', None))}", flush=True)
+    except (OSError, UnicodeEncodeError, AttributeError, TypeError, ValueError) as e:
+        try:
+            console = get_console()
+            console.print(f"[summary] Non-fatal error while printing run summary: {e!r}", flush=True)
+            if _debug_enabled():
+                console.print(traceback.format_exc(), flush=True)
+        except (OSError, UnicodeEncodeError, AttributeError, TypeError, ValueError):
+            return
 
 

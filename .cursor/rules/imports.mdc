@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+In correct Python, imports go at the top, and nowhere else.
+Do NOT inline comments.

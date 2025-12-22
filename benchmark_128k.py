@@ -16,12 +16,13 @@ Usage:
     python3 benchmark_128k.py --compare runs/context_1024/best.pt runs/baseline_context_1024/best.pt
 """
 import argparse
-import time
+import importlib
+import importlib.util
 import math
 import sys
-from pathlib import Path
+import time
 from dataclasses import dataclass
-import importlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -31,7 +32,10 @@ from production.model import DecoupledLayerKVCache, GPT, LayerKVCache, ModelConf
 from production.selfopt_cache import as_object_list, as_object_pair2, as_str_object_dict
 
 # Optional plotting dependency (avoid importing at module load so type checking doesn't require it).
-HAS_MATPLOTLIB: bool = False if TYPE_CHECKING else bool(importlib.util.find_spec("matplotlib.pyplot") is not None)
+if TYPE_CHECKING:
+    HAS_MATPLOTLIB: bool = False
+else:
+    HAS_MATPLOTLIB = importlib.util.find_spec("matplotlib.pyplot") is not None
 
 
 def _torch_load_obj(path: str, *, device: torch.device) -> object:
@@ -49,6 +53,37 @@ def _as_state_dict(o: object) -> dict[str, torch.Tensor] | None:
             return None
         out[str(k)] = v
     return out
+
+
+def _load_checkpoint_and_model(ckpt_path: str, device: torch.device) -> tuple[ModelConfig, GPT]:
+    """
+    Load checkpoint from disk and initialize the model.
+
+    Args:
+        ckpt_path: Path to the checkpoint file
+        device: Device to load the model on
+
+    Returns:
+        Tuple of (ModelConfig, GPT) with the loaded and initialized model
+
+    Raises:
+        ValueError: If checkpoint is malformed or missing required keys
+    """
+    ckpt_obj = _torch_load_obj(str(ckpt_path), device=device)
+    ckpt = as_str_object_dict(ckpt_obj)
+    if ckpt is None:
+        raise ValueError("Checkpoint must be a dict-like object")
+    cfg_map = as_str_object_dict(ckpt.get("config"))
+    if cfg_map is None:
+        raise ValueError("Checkpoint missing config")
+    cfg = ModelConfig.from_dict(cfg_map, device=device)
+    model = GPT(cfg).to(device)
+    sd = _as_state_dict(ckpt.get("model"))
+    if sd is None:
+        raise ValueError("Checkpoint missing model state_dict")
+    _ = model.load_state_dict(sd)
+    _ = model.eval()
+    return (cfg, model)
 
 
 def get_memory_usage_gb() -> float:
@@ -301,7 +336,16 @@ def _as_int_list(o: object, default: list[int]) -> list[int]:
     out: list[int] = []
     for item in lst:
         try:
-            out.append(int(str(item)))
+            # Handle numeric types directly
+            if isinstance(item, (int, float)):
+                out.append(int(item))
+            else:
+                # Try converting string to int directly
+                try:
+                    out.append(int(str(item)))
+                except ValueError:
+                    # If direct int conversion fails, try via float for float-like strings
+                    out.append(int(float(str(item))))
         except (TypeError, ValueError):
             continue
     return out if out else list(default)
@@ -463,20 +507,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Loading: {ckpt_path}")
             print('='*60)
 
-            ckpt_obj = _torch_load_obj(str(ckpt_path), device=device)
-            ckpt = as_str_object_dict(ckpt_obj)
-            if ckpt is None:
-                raise ValueError("Checkpoint must be a dict-like object")
-            cfg_map = as_str_object_dict(ckpt.get("config"))
-            if cfg_map is None:
-                raise ValueError("Checkpoint missing config")
-            cfg = ModelConfig.from_dict(cfg_map, device=device)
-            model = GPT(cfg).to(device)
-            sd = _as_state_dict(ckpt.get("model"))
-            if sd is None:
-                raise ValueError("Checkpoint missing model state_dict")
-            _ = model.load_state_dict(sd)
-            _ = model.eval()
+            cfg, model = _load_checkpoint_and_model(str(ckpt_path), device)
 
             model_name = f"{cfg.attn_mode}"
             if cfg.attn_mode == 'decoupled':
@@ -547,20 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Loading: {ckpt_path_obj}")
         print('='*60)
 
-        ckpt_obj = _torch_load_obj(str(ckpt_path_obj), device=device)
-        ckpt = as_str_object_dict(ckpt_obj)
-        if ckpt is None:
-            raise ValueError("Checkpoint must be a dict-like object")
-        cfg_map = as_str_object_dict(ckpt.get("config"))
-        if cfg_map is None:
-            raise ValueError("Checkpoint missing config")
-        cfg = ModelConfig.from_dict(cfg_map, device=device)
-        model = GPT(cfg).to(device)
-        sd = _as_state_dict(ckpt.get("model"))
-        if sd is None:
-            raise ValueError("Checkpoint missing model state_dict")
-        _ = model.load_state_dict(sd)
-        _ = model.eval()
+        cfg, model = _load_checkpoint_and_model(str(ckpt_path_obj), device)
 
         print(f"Attention mode: {cfg.attn_mode}")
         print(f"Trained context: {cfg.block_size}")

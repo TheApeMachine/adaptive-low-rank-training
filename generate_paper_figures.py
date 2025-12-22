@@ -613,8 +613,12 @@ def generate_comparison_bar(
 
         # Gap annotation
         if len(vals) >= 2:
-            gap = vals[1] - vals[0]
-            gap_pct = (gap / vals[0]) * 100
+            gap = abs(vals[1] - vals[0])
+            base = vals[0]
+            if base != 0:
+                gap_pct = (gap / abs(base)) * 100
+            else:
+                gap_pct = float("inf") if gap != 0 else 0.0
             _ = _call_attr(
                 ax2,
                 "annotate",

@@ -52,7 +52,14 @@ def _as_opt_int(x: object) -> int | None:
     try:
         return int(str(x))
     except (ValueError, TypeError):
+        pass
+
+    try:
+        v = float(str(x))
+    except (ValueError, TypeError):
         return None
+
+    return int(v) if v.is_integer() else None
 
 
 @dataclass(frozen=True)
