@@ -78,6 +78,17 @@ class ModelConfig:
     mlp: Literal["swiglu", "gelu"] = "swiglu"
     dropout: float = 0.0
 
+    # Optional diffusion head (embedding-space denoiser conditioned on x_small).
+    diffusion_head: bool = False
+    diffusion_head_num_train_timesteps: int = 1000
+    diffusion_head_num_infer_steps: int = 12
+    diffusion_head_time_embed_dim: int = 128
+    diffusion_head_mlp_mult: int = 4
+    diffusion_head_cfg_dropout_p: float = 0.10
+    diffusion_head_cfg_guidance_scale: float = 1.5
+    diffusion_head_scheduler: str = "ddim"  # "ddpm" | "ddim" | "dpm"
+    diffusion_head_loss_weight: float = 0.10
+
     def __post_init__(self) -> None:
         # Normalize device inputs (some checkpoints store device as string).
         dev = self.device
@@ -108,6 +119,48 @@ class ModelConfig:
         if not math.isfinite(self.dropout):
             self.dropout = 0.0
         self.dropout = float(min(max(self.dropout, 0.0), 1.0))
+
+        # Diffusion head normalization (safe defaults, clamp ranges).
+        try:
+            self.diffusion_head = bool(self.diffusion_head)
+        except (TypeError, ValueError):
+            self.diffusion_head = False
+        try:
+            self.diffusion_head_num_train_timesteps = int(max(1, int(self.diffusion_head_num_train_timesteps)))
+        except (TypeError, ValueError):
+            self.diffusion_head_num_train_timesteps = 1000
+        try:
+            self.diffusion_head_num_infer_steps = int(max(1, int(self.diffusion_head_num_infer_steps)))
+        except (TypeError, ValueError):
+            self.diffusion_head_num_infer_steps = 12
+        try:
+            self.diffusion_head_time_embed_dim = int(max(8, int(self.diffusion_head_time_embed_dim)))
+        except (TypeError, ValueError):
+            self.diffusion_head_time_embed_dim = 128
+        try:
+            self.diffusion_head_mlp_mult = int(max(1, int(self.diffusion_head_mlp_mult)))
+        except (TypeError, ValueError):
+            self.diffusion_head_mlp_mult = 4
+        try:
+            self.diffusion_head_cfg_dropout_p = float(self.diffusion_head_cfg_dropout_p)
+        except (TypeError, ValueError):
+            self.diffusion_head_cfg_dropout_p = 0.10
+        if (not math.isfinite(self.diffusion_head_cfg_dropout_p)) or self.diffusion_head_cfg_dropout_p < 0.0:
+            self.diffusion_head_cfg_dropout_p = 0.0
+        self.diffusion_head_cfg_dropout_p = float(min(self.diffusion_head_cfg_dropout_p, 1.0))
+        try:
+            self.diffusion_head_cfg_guidance_scale = float(self.diffusion_head_cfg_guidance_scale)
+        except (TypeError, ValueError):
+            self.diffusion_head_cfg_guidance_scale = 1.5
+        if (not math.isfinite(self.diffusion_head_cfg_guidance_scale)) or self.diffusion_head_cfg_guidance_scale < 1.0:
+            self.diffusion_head_cfg_guidance_scale = 1.0
+        try:
+            self.diffusion_head_loss_weight = float(self.diffusion_head_loss_weight)
+        except (TypeError, ValueError):
+            self.diffusion_head_loss_weight = 0.10
+        if (not math.isfinite(self.diffusion_head_loss_weight)) or self.diffusion_head_loss_weight < 0.0:
+            self.diffusion_head_loss_weight = 0.0
+        self.diffusion_head_scheduler = str(self.diffusion_head_scheduler or "ddim").strip().lower() or "ddim"
 
     @classmethod
     def from_dict(cls, cfg: Mapping[str, object], *, device: torch.device | None = None) -> "ModelConfig":
@@ -221,6 +274,24 @@ class ModelConfig:
                     inst.mlp = "gelu" if mlp == "gelu" else "swiglu"
                 case "dropout":
                     inst.dropout = _as_float(v, 0.0)
+                case "diffusion_head":
+                    inst.diffusion_head = _as_bool(v, False)
+                case "diffusion_head_num_train_timesteps":
+                    inst.diffusion_head_num_train_timesteps = _as_int(v, 1000)
+                case "diffusion_head_num_infer_steps":
+                    inst.diffusion_head_num_infer_steps = _as_int(v, 12)
+                case "diffusion_head_time_embed_dim":
+                    inst.diffusion_head_time_embed_dim = _as_int(v, 128)
+                case "diffusion_head_mlp_mult":
+                    inst.diffusion_head_mlp_mult = _as_int(v, 4)
+                case "diffusion_head_cfg_dropout_p":
+                    inst.diffusion_head_cfg_dropout_p = _as_float(v, 0.10)
+                case "diffusion_head_cfg_guidance_scale":
+                    inst.diffusion_head_cfg_guidance_scale = _as_float(v, 1.5)
+                case "diffusion_head_scheduler":
+                    inst.diffusion_head_scheduler = str(v).strip().lower()
+                case "diffusion_head_loss_weight":
+                    inst.diffusion_head_loss_weight = _as_float(v, 0.10)
                 case _:
                     # Unknown/unsupported key (or a field we don't want to restore).
                     pass

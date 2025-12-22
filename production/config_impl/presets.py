@@ -57,6 +57,19 @@ EXP_PRESETS: dict[str, dict[str, object]] = {
     "paper_baseline_lr4e4": dict(attn_mode="standard", lr=4e-4),
     # Training-oriented preset: expresses intent only; runtime performance is auto-tuned.
     "train_decoupled_fast": dict(attn_mode="decoupled", tie_qk=True, rope=True, null_attn=False),
+    # Fun: diffusion-on-top head conditioned on x_small (requires `diffusers` installed).
+    "fun_diffusion_head": dict(
+        attn_mode="standard",
+        diffusion_head=True,
+        diffusion_head_scheduler="ddim",
+        diffusion_head_num_train_timesteps=1000,
+        diffusion_head_num_infer_steps=12,
+        diffusion_head_time_embed_dim=128,
+        diffusion_head_mlp_mult=4,
+        diffusion_head_cfg_dropout_p=0.10,
+        diffusion_head_cfg_guidance_scale=1.5,
+        diffusion_head_loss_weight=0.10,
+    ),
 }
 
 
@@ -83,6 +96,22 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
         return
 
     preset = EXP_PRESETS[exp]
+
+    # Optional diffusion head knobs (do not depend on d_model being present).
+    if "diffusion_head" in preset:
+        args.diffusion_head = bool(preset["diffusion_head"])
+    for k in [
+        "diffusion_head_scheduler",
+        "diffusion_head_num_train_timesteps",
+        "diffusion_head_num_infer_steps",
+        "diffusion_head_time_embed_dim",
+        "diffusion_head_mlp_mult",
+        "diffusion_head_cfg_dropout_p",
+        "diffusion_head_cfg_guidance_scale",
+        "diffusion_head_loss_weight",
+    ]:
+        if k in preset:
+            setattr(args, k, preset[k])
 
     # Training hyperparameter overrides (used for controlled sweeps in the manifest).
     if "lr" in preset:

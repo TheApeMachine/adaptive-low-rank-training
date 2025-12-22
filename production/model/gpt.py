@@ -32,6 +32,7 @@ from .metrics import Metrics
 from .block import Block
 from .cache import Cache
 from .config import ModelConfig
+from .diffusion_head import DiffusionHeadConfig, DiffusionNextTokenHead, DIFFUSERS_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,26 @@ class GPT(nn.Module):
         self.drop: nn.Dropout = nn.Dropout(cfg.dropout)
         self.blocks: nn.ModuleList = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.ln_f: nn.LayerNorm = nn.LayerNorm(cfg.d_model)
+
+        self.diffusion_head: DiffusionNextTokenHead | None = None
+        if bool(getattr(cfg, "diffusion_head", False)):
+            if not DIFFUSERS_AVAILABLE:
+                raise RuntimeError(
+                    "cfg.diffusion_head is enabled but `diffusers` is not installed. "
+                    + "Install with: pip install diffusers"
+                )
+            dh_cfg = DiffusionHeadConfig(
+                enabled=True,
+                num_train_timesteps=int(getattr(cfg, "diffusion_head_num_train_timesteps", 1000)),
+                num_infer_steps=int(getattr(cfg, "diffusion_head_num_infer_steps", 12)),
+                time_embed_dim=int(getattr(cfg, "diffusion_head_time_embed_dim", 128)),
+                mlp_mult=int(getattr(cfg, "diffusion_head_mlp_mult", 4)),
+                cfg_dropout_p=float(getattr(cfg, "diffusion_head_cfg_dropout_p", 0.10)),
+                cfg_guidance_scale=float(getattr(cfg, "diffusion_head_cfg_guidance_scale", 1.5)),
+                scheduler=str(getattr(cfg, "diffusion_head_scheduler", "ddim")),
+                loss_weight=float(getattr(cfg, "diffusion_head_loss_weight", 0.10)),
+            )
+            self.diffusion_head = DiffusionNextTokenHead(embed_dim=int(cfg.embed_dim), cfg=dh_cfg)
 
         # Causal mask for prefill
         mask = torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool))

@@ -13,9 +13,10 @@ import json
 import math
 import os
 import time
-from typing import Protocol, cast
+from typing import Protocol, cast, runtime_checkable
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 from production.console import get_console
 from production.data import TokenView
@@ -39,7 +40,12 @@ import production.data as data_mod
 class _TrainModel(Protocol):
     """Minimal callable model interface for typed training/eval loops."""
 
-    def __call__(self, idx: torch.Tensor) -> tuple[torch.Tensor, object]: ...
+    def __call__(self, idx: torch.Tensor, *, return_features: bool = False) -> tuple[torch.Tensor, object]: ...
+
+
+@runtime_checkable
+class _DiffusionHead(Protocol):
+    def diffusion_loss(self, *, cond: torch.Tensor, target_emb: torch.Tensor) -> torch.Tensor: ...
 
 
 class _BackwardTensor(Protocol):
@@ -333,9 +339,27 @@ class Trainer:
                         mark_obj: object = getattr(compiler_obj, "cudagraph_mark_step_begin", None)
                         if callable(mark_obj):
                             cast(_CudaGraphStepMarker, mark_obj)()
-                    logits, _cache = model_call(xb)
-                    # Avoid shape gymnastics in the hot path; logits last dim is vocab.
-                    loss = ce(logits.view(-1, vocab_size), yb.view(-1))
+                    use_diff = bool(getattr(cfg, "diffusion_head", False)) and getattr(model, "diffusion_head", None) is not None
+                    if use_diff:
+                        x_small, _cache = model_call(xb, return_features=True)
+                        model_obj = cast(object, model)
+                        tok_emb_obj = getattr(model_obj, "tok_emb", None)
+                        if not isinstance(tok_emb_obj, nn.Embedding):
+                            raise TypeError("diffusion_head enabled but model.tok_emb is not an nn.Embedding")
+                        tok_emb = tok_emb_obj
+                        logits = x_small @ tok_emb.weight.t()
+                        loss_ce = ce(logits.view(-1, vocab_size), yb.view(-1))
+                        target_emb = cast(torch.Tensor, tok_emb(yb))
+                        diff_head_obj = getattr(model_obj, "diffusion_head", None)
+                        if not isinstance(diff_head_obj, _DiffusionHead):
+                            raise TypeError("diffusion_head enabled but model.diffusion_head does not implement diffusion_loss")
+                        diff_loss = diff_head_obj.diffusion_loss(cond=x_small, target_emb=target_emb)
+                        w = float(getattr(cfg, "diffusion_head_loss_weight", 0.10))
+                        loss = loss_ce + float(max(0.0, w)) * diff_loss
+                    else:
+                        logits, _cache = model_call(xb)
+                        # Avoid shape gymnastics in the hot path; logits last dim is vocab.
+                        loss = ce(logits.view(-1, vocab_size), yb.view(-1))
                     loss_to_back = loss * float(inv_ga)
                 loss_sum_t = loss_sum_t + loss.detach().to(dtype=torch.float32)
                 if scaler is not None:
@@ -582,6 +606,17 @@ class Trainer:
         cfg.tie_qk = bool(self.run_cfg.tie_qk)
         cfg.null_attn = bool(self.run_cfg.null_attn)
         cfg.learned_temp = (not bool(self.run_cfg.no_learned_temp))
+
+        # Optional diffusion head (adapter)
+        cfg.diffusion_head = bool(self.run_cfg.diffusion_head)
+        cfg.diffusion_head_num_train_timesteps = int(self.run_cfg.diffusion_head_num_train_timesteps)
+        cfg.diffusion_head_num_infer_steps = int(self.run_cfg.diffusion_head_num_infer_steps)
+        cfg.diffusion_head_time_embed_dim = int(self.run_cfg.diffusion_head_time_embed_dim)
+        cfg.diffusion_head_mlp_mult = int(self.run_cfg.diffusion_head_mlp_mult)
+        cfg.diffusion_head_cfg_dropout_p = float(self.run_cfg.diffusion_head_cfg_dropout_p)
+        cfg.diffusion_head_cfg_guidance_scale = float(self.run_cfg.diffusion_head_cfg_guidance_scale)
+        cfg.diffusion_head_scheduler = str(self.run_cfg.diffusion_head_scheduler)
+        cfg.diffusion_head_loss_weight = float(self.run_cfg.diffusion_head_loss_weight)
 
         mlp = str(self.run_cfg.mlp or "swiglu").strip().lower()
         cfg.mlp = "gelu" if mlp == "gelu" else "swiglu"

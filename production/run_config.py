@@ -203,6 +203,17 @@ class TrainConfig(CommonRunConfig):
     mlp: str
     dropout: float
 
+    # Optional diffusion head (adapter) knobs
+    diffusion_head: bool
+    diffusion_head_num_train_timesteps: int
+    diffusion_head_num_infer_steps: int
+    diffusion_head_time_embed_dim: int
+    diffusion_head_mlp_mult: int
+    diffusion_head_cfg_dropout_p: float
+    diffusion_head_cfg_guidance_scale: float
+    diffusion_head_scheduler: str
+    diffusion_head_loss_weight: float
+
     # Training
     steps: int
     optimizer: str
@@ -282,6 +293,15 @@ class TrainConfig(CommonRunConfig):
             no_learned_temp=bool(_get(d, "no_learned_temp", False)),
             mlp=_as_str(_get(d, "mlp", "swiglu"), "swiglu"),
             dropout=_as_float(_get(d, "dropout", 0.0), 0.0),
+            diffusion_head=bool(_get(d, "diffusion_head", False)),
+            diffusion_head_num_train_timesteps=_as_int(_get(d, "diffusion_head_num_train_timesteps", 1000), 1000),
+            diffusion_head_num_infer_steps=_as_int(_get(d, "diffusion_head_num_infer_steps", 12), 12),
+            diffusion_head_time_embed_dim=_as_int(_get(d, "diffusion_head_time_embed_dim", 128), 128),
+            diffusion_head_mlp_mult=_as_int(_get(d, "diffusion_head_mlp_mult", 4), 4),
+            diffusion_head_cfg_dropout_p=_as_float(_get(d, "diffusion_head_cfg_dropout_p", 0.10), 0.10),
+            diffusion_head_cfg_guidance_scale=_as_float(_get(d, "diffusion_head_cfg_guidance_scale", 1.5), 1.5),
+            diffusion_head_scheduler=_as_str(_get(d, "diffusion_head_scheduler", "ddim"), "ddim"),
+            diffusion_head_loss_weight=_as_float(_get(d, "diffusion_head_loss_weight", 0.10), 0.10),
             steps=_as_int(_get(d, "steps", -1), -1),
             optimizer=_as_str(_get(d, "optimizer", "adamw"), "adamw"),
             lr=_as_float(_get(d, "lr", 3e-4), 3e-4),
