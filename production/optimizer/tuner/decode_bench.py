@@ -12,16 +12,17 @@ from production.optimizer.tuner.decode_plan import KVDecodePlan
 
 
 def time_ms(*, device: torch.device, fn: Callable[[], None]) -> float:
-    """Time a callable, using CUDA events when available."""
+    """Time a callable.
+
+    Note: we intentionally use synchronize+wall-clock timing for CUDA to avoid relying on
+    partially-typed CUDA Event APIs (keeps basedpyright strict).
+    """
     if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(device)
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        t0 = time.perf_counter()
         fn()
-        end.record()
         torch.cuda.synchronize(device)
-        return float(cast(object, start).elapsed_time(cast(object, end)))
+        return float((time.perf_counter() - t0) * 1000.0)
     t0 = time.perf_counter()
     fn()
     return float((time.perf_counter() - t0) * 1000.0)

@@ -4,14 +4,16 @@ CLI for the production system.
 from __future__ import annotations
 import argparse
 import sys
-from typing import NoReturn, cast, override
+from typing import NoReturn, cast
+
+# Python 3.12+ has `typing.override`; older runtimes should use typing_extensions.
+try:  # pragma: no cover
+    from typing import override  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    from typing_extensions import override
 import copy
 import math
-import torch
 from production.config import EXP_PRESETS
-from production.config import pick_device, set_seed
-from production.optimizer import apply_dynamic_config
-from production.runner import run_single
 
 
 class _MinimalParser(argparse.ArgumentParser):
@@ -56,7 +58,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Target model size in params (e.g. 100m, 1b). If omitted, inferred from dataset tokens.",
     )
-    _ = ap.add_argument("--layers", type=int, default=None, help="Optional model depth override. If omitted, inferred.")
     _ = ap.add_argument("--data", type=str, default=None, help="Dataset path (train mode).")
     _ = ap.add_argument("--ckpt", type=str, default=None, help="Checkpoint path (sample mode).")
     _ = ap.add_argument("--out-dir", type=str, default=None, help="Output directory (optional if size+exp given).")
@@ -64,12 +65,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _ = ap.add_argument(
         "--resume-path", type=str, default=None, help="Resume training from an explicit checkpoint path (train mode only)."
     )
-    _ = ap.add_argument(
-        "--resume-allow-config-mismatch",
-        action="store_true",
-        help="Allow resuming even if the resolved model config differs (unsafe).",
-    )
-    _ = ap.add_argument("--run-tag", type=str, default=None, help="Optional suffix for auto run dirs.")
     _ = ap.add_argument("--seed", type=int, default=1337)
     _ = ap.add_argument(
         "--steps",
@@ -86,9 +81,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     _ = ap.add_argument("--max-new-tokens", type=int, default=50)
     _ = ap.add_argument("--temperature", type=float, default=1.0)
     _ = ap.add_argument("--top-k", type=int, default=None)
-    _ = ap.add_argument("--wandb", action="store_true", help="Write Weights & Biases scalars.")
-    _ = ap.add_argument("--wandb-project", type=str, default="production")
-    _ = ap.add_argument("--wandb-entity", type=str, default=None)
+    # Default-on behavior: if user doesn't specify, we enable W&B by internal defaults.
+    # `BooleanOptionalAction` provides `--wandb/--no-wandb` with default=None.
+    _ = ap.add_argument(
+        "--wandb",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write Weights & Biases scalars (default: enabled).",
+    )
 
     return ap
 
@@ -118,6 +118,12 @@ def run(args: argparse.Namespace) -> int:
             raise ValueError("--spec-disable-below-accept must be between 0.0 and 1.0") from e
         if not math.isfinite(sdb_f) or sdb_f < 0.0 or sdb_f > 1.0:
             raise ValueError("--spec-disable-below-accept must be between 0.0 and 1.0")
+
+    # Local imports so `parse_args()` (and `--help`) don't require torch.
+    import torch
+    from production.config import pick_device, set_seed
+    from production.optimizer import apply_dynamic_config
+    from production.runner import run_single
 
     device = pick_device(getattr(args, "device", None))
     set_seed(int(getattr(args, "seed", 1337)))

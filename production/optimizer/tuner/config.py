@@ -87,6 +87,18 @@ class KVSelfOptConfig:
     quality_long_kl_tol: float | None = None
     quality_long_compute_kl: bool = False
 
+    # Optional semantic/induction gate (final accept): tests long-range retrieval-like behavior.
+    # This is meant to catch cumulative drift that only appears at long distances, beyond local logit fidelity.
+    policy_quality_needle: bool = False
+    calib_needle_tokens: str | None = None
+    calib_needle_prefill: int | None = None
+    needle_pattern_len: int | None = None
+    quality_needle_tol: float | None = None
+    quality_needle_delta_nll_tol: float | None = None
+    quality_needle_ppl_ratio_tol: float | None = None
+    quality_needle_kl_tol: float | None = None
+    quality_needle_compute_kl: bool = False
+
     # Optional "repair" path for cache-policy tuning.
     layerwise_cache: bool = False
 

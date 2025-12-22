@@ -3,31 +3,42 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from typing import Any, Optional
+
+# Python 3.12+ has `typing.override`; older runtimes should use typing_extensions.
+try:  # pragma: no cover
+    from typing import override  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    from typing_extensions import override
+
+from production.selfopt_cache import as_str_object_dict
 
 
-def _get(args: argparse.Namespace, name: str, default: Any) -> Any:
+def _args_map(args: argparse.Namespace) -> dict[str, object]:
+    # `argparse.Namespace` is dynamically typed (attributes are `Any`); treat it as a dict boundary.
+    d = as_str_object_dict(args.__dict__)
+    return {} if d is None else d
+
+
+def _get(d: dict[str, object], name: str, default: object | None = None) -> object | None:
+    v = d.get(str(name), default)
+    return v
+
+
+def _as_int(x: object, default: int) -> int:
     try:
-        return getattr(args, name)
-    except AttributeError:
-        return default
-
-
-def _as_int(x: Any, default: int) -> int:
-    try:
-        return int(x)
+        return int(str(x))
     except (ValueError, TypeError):
         return int(default)
 
 
-def _as_float(x: Any, default: float) -> float:
+def _as_float(x: object, default: float) -> float:
     try:
-        return float(x)
+        return float(str(x))
     except (ValueError, TypeError):
         return float(default)
 
 
-def _as_str(x: Any, default: str) -> str:
+def _as_str(x: object, default: str) -> str:
     try:
         s = str(x)
         return s
@@ -35,11 +46,11 @@ def _as_str(x: Any, default: str) -> str:
         return str(default)
 
 
-def _as_opt_int(x: Any) -> Optional[int]:
+def _as_opt_int(x: object) -> int | None:
     if x is None:
         return None
     try:
-        return int(x)
+        return int(str(x))
     except (ValueError, TypeError):
         return None
 
@@ -48,7 +59,7 @@ def _as_opt_int(x: Any) -> Optional[int]:
 class CommonRunConfig:
     """Common configuration shared by training and sampling runs."""
 
-    out_dir: Optional[str]
+    out_dir: str | None
     instrument: str
     live_plot: bool
     tb: bool
@@ -57,12 +68,15 @@ class CommonRunConfig:
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "CommonRunConfig":
         """Create a CommonRunConfig from argparse.Namespace arguments."""
+        d = _args_map(args)
+        wandb_raw = _get(d, "wandb", False)
+        wandb_enabled = True if wandb_raw is None else bool(wandb_raw)
         return cls(
-            out_dir=(_as_str(_get(args, "out_dir", None), "") or None),
-            instrument=_as_str(_get(args, "instrument", "off"), "off"),
-            live_plot=bool(_get(args, "live_plot", False)),
-            tb=bool(_get(args, "tb", False)),
-            wandb=bool(_get(args, "wandb", False)),
+            out_dir=(_as_str(_get(d, "out_dir", None), "") or None),
+            instrument=_as_str(_get(d, "instrument", "off"), "off"),
+            live_plot=bool(_get(d, "live_plot", False)),
+            tb=bool(_get(d, "tb", False)),
+            wandb=bool(wandb_enabled),
         )
 
 
@@ -71,13 +85,13 @@ class SampleConfig(CommonRunConfig):
     """Configuration for model sampling/inference runs."""
 
     ckpt: str
-    draft_ckpt: Optional[str]
+    draft_ckpt: str | None
     prompt_tokens: str
     tokenizer: str
 
     max_new_tokens: int
     temperature: float
-    top_k: Optional[int]
+    top_k: int | None
 
     # KV controls
     kv_cache: str
@@ -87,14 +101,14 @@ class SampleConfig(CommonRunConfig):
     kv_fused: str
 
     # Optional heterogeneous overrides
-    kv_cache_k: Optional[str]
-    kv_cache_v: Optional[str]
-    kv_cache_k_sem: Optional[str]
-    kv_cache_k_geo: Optional[str]
-    kv_qblock_k: Optional[int]
-    kv_qblock_v: Optional[int]
-    kv_qblock_k_sem: Optional[int]
-    kv_qblock_k_geo: Optional[int]
+    kv_cache_k: str | None
+    kv_cache_v: str | None
+    kv_cache_k_sem: str | None
+    kv_cache_k_geo: str | None
+    kv_qblock_k: int | None
+    kv_qblock_v: int | None
+    kv_qblock_k_sem: int | None
+    kv_qblock_k_geo: int | None
 
     # Spec knobs
     spec_k: int
@@ -103,42 +117,48 @@ class SampleConfig(CommonRunConfig):
     spec_disable_below_accept: float
 
     # Expert override for decoupled cache policy
-    kv_policy: Optional[str]
+    kv_policy: str | None
 
     @classmethod
+    @override
     def from_args(cls, args: argparse.Namespace) -> "SampleConfig":
+        d = _args_map(args)
         common = CommonRunConfig.from_args(args)
-        ckpt = _as_str(_get(args, "ckpt", ""), "")
+        ckpt = _as_str(_get(d, "ckpt", ""), "")
         if not ckpt:
             ckpt = ""
-        draft = _as_str(_get(args, "draft_ckpt", ""), "") or None
+        draft = _as_str(_get(d, "draft_ckpt", ""), "") or None
         return cls(
-            **common.__dict__,
+            out_dir=common.out_dir,
+            instrument=common.instrument,
+            live_plot=common.live_plot,
+            tb=common.tb,
+            wandb=common.wandb,
             ckpt=ckpt,
             draft_ckpt=draft,
-            prompt_tokens=_as_str(_get(args, "prompt_tokens", "0"), "0"),
-            tokenizer=_as_str(_get(args, "tokenizer", "raw"), "raw"),
-            max_new_tokens=_as_int(_get(args, "max_new_tokens", 50), 50),
-            temperature=_as_float(_get(args, "temperature", 1.0), 1.0),
-            top_k=_as_opt_int(_get(args, "top_k", None)),
-            kv_cache=_as_str(_get(args, "kv_cache", "fp16"), "fp16"),
-            kv_qblock=_as_int(_get(args, "kv_qblock", 32), 32),
-            kv_residual=_as_int(_get(args, "kv_residual", 0), 0),
-            kv_decode_block=_as_int(_get(args, "kv_decode_block", 1024), 1024),
-            kv_fused=_as_str(_get(args, "kv_fused", "auto"), "auto"),
-            kv_cache_k=(_as_str(_get(args, "kv_cache_k", ""), "") or None),
-            kv_cache_v=(_as_str(_get(args, "kv_cache_v", ""), "") or None),
-            kv_cache_k_sem=(_as_str(_get(args, "kv_cache_k_sem", ""), "") or None),
-            kv_cache_k_geo=(_as_str(_get(args, "kv_cache_k_geo", ""), "") or None),
-            kv_qblock_k=_as_opt_int(_get(args, "kv_qblock_k", None)),
-            kv_qblock_v=_as_opt_int(_get(args, "kv_qblock_v", None)),
-            kv_qblock_k_sem=_as_opt_int(_get(args, "kv_qblock_k_sem", None)),
-            kv_qblock_k_geo=_as_opt_int(_get(args, "kv_qblock_k_geo", None)),
-            spec_k=_as_int(_get(args, "spec_k", 4), 4),
-            spec_method=_as_str(_get(args, "spec_method", "reject_sampling"), "reject_sampling"),
-            spec_extra_token=bool(_get(args, "spec_extra_token", False)),
-            spec_disable_below_accept=_as_float(_get(args, "spec_disable_below_accept", 0.0), 0.0),
-            kv_policy=(_as_str(_get(args, "kv_policy", ""), "") or None),
+            prompt_tokens=_as_str(_get(d, "prompt_tokens", "0"), "0"),
+            tokenizer=_as_str(_get(d, "tokenizer", "raw"), "raw"),
+            max_new_tokens=_as_int(_get(d, "max_new_tokens", 50), 50),
+            temperature=_as_float(_get(d, "temperature", 1.0), 1.0),
+            top_k=_as_opt_int(_get(d, "top_k", None)),
+            kv_cache=_as_str(_get(d, "kv_cache", "fp16"), "fp16"),
+            kv_qblock=_as_int(_get(d, "kv_qblock", 32), 32),
+            kv_residual=_as_int(_get(d, "kv_residual", 0), 0),
+            kv_decode_block=_as_int(_get(d, "kv_decode_block", 1024), 1024),
+            kv_fused=_as_str(_get(d, "kv_fused", "auto"), "auto"),
+            kv_cache_k=(_as_str(_get(d, "kv_cache_k", ""), "") or None),
+            kv_cache_v=(_as_str(_get(d, "kv_cache_v", ""), "") or None),
+            kv_cache_k_sem=(_as_str(_get(d, "kv_cache_k_sem", ""), "") or None),
+            kv_cache_k_geo=(_as_str(_get(d, "kv_cache_k_geo", ""), "") or None),
+            kv_qblock_k=_as_opt_int(_get(d, "kv_qblock_k", None)),
+            kv_qblock_v=_as_opt_int(_get(d, "kv_qblock_v", None)),
+            kv_qblock_k_sem=_as_opt_int(_get(d, "kv_qblock_k_sem", None)),
+            kv_qblock_k_geo=_as_opt_int(_get(d, "kv_qblock_k_geo", None)),
+            spec_k=_as_int(_get(d, "spec_k", 4), 4),
+            spec_method=_as_str(_get(d, "spec_method", "reject_sampling"), "reject_sampling"),
+            spec_extra_token=bool(_get(d, "spec_extra_token", False)),
+            spec_disable_below_accept=_as_float(_get(d, "spec_disable_below_accept", 0.0), 0.0),
+            kv_policy=(_as_str(_get(d, "kv_policy", ""), "") or None),
         )
 
 
@@ -147,7 +167,7 @@ class TrainConfig(CommonRunConfig):
     """Configuration for model training runs."""
 
     data: str
-    vocab_size: Optional[int]
+    vocab_size: int | None
     tokenizer: str
     data_format: str
     data_dtype: str
@@ -157,7 +177,7 @@ class TrainConfig(CommonRunConfig):
     block: int
     layers: int
     n_head: int
-    kv_head: Optional[int]
+    kv_head: int | None
     d_model: int
     d_ff: int
     embed_dim: int
@@ -199,9 +219,9 @@ class TrainConfig(CommonRunConfig):
     log_every: int
 
     # Schedules (optional)
-    seq_schedule: Optional[str]
-    batch_schedule: Optional[str]
-    batch_by_seq: Optional[str]
+    seq_schedule: str | None
+    batch_schedule: str | None
+    batch_by_seq: str | None
 
     # Batch defaults (can be auto-populated later)
     batch_size: int
@@ -209,7 +229,7 @@ class TrainConfig(CommonRunConfig):
 
     # Resume
     resume: bool
-    resume_path: Optional[str]
+    resume_path: str | None
     resume_allow_config_mismatch: bool
 
     # Stability
@@ -220,62 +240,68 @@ class TrainConfig(CommonRunConfig):
     legacy_micro_steps: bool
 
     @classmethod
+    @override
     def from_args(cls, args: argparse.Namespace) -> "TrainConfig":
+        d = _args_map(args)
         common = CommonRunConfig.from_args(args)
         return cls(
-            **common.__dict__,
-            data=_as_str(_get(args, "data", ""), ""),
-            vocab_size=_as_opt_int(_get(args, "vocab_size", None)),
-            tokenizer=_as_str(_get(args, "tokenizer", "raw"), "raw"),
-            data_format=_as_str(_get(args, "data_format", "auto"), "auto"),
-            data_dtype=_as_str(_get(args, "data_dtype", "int64"), "int64"),
-            val_frac=_as_float(_get(args, "val_frac", 0.1), 0.1),
-            block=_as_int(_get(args, "block", 0), 0),
-            layers=_as_int(_get(args, "layers", 0), 0),
-            n_head=_as_int(_get(args, "n_head", 0), 0),
-            kv_head=_as_opt_int(_get(args, "kv_head", None)),
-            d_model=_as_int(_get(args, "d_model", 0), 0),
-            d_ff=_as_int(_get(args, "d_ff", 0), 0),
-            embed_dim=_as_int(_get(args, "embed_dim", 0), 0),
-            attn_mode=_as_str(_get(args, "attn_mode", ""), ""),
-            attn_dim=_as_int(_get(args, "attn_dim", 0), 0),
-            sem_dim=_as_int(_get(args, "sem_dim", 0), 0),
-            geo_dim=_as_int(_get(args, "geo_dim", 0), 0),
-            no_decoupled_gate=bool(_get(args, "no_decoupled_gate", False)),
-            no_rope=bool(_get(args, "no_rope", False)),
-            rope_base=_as_float(_get(args, "rope_base", 10000.0), 10000.0),
-            tie_qk=bool(_get(args, "tie_qk", False)),
-            null_attn=bool(_get(args, "null_attn", False)),
-            no_learned_temp=bool(_get(args, "no_learned_temp", False)),
-            mlp=_as_str(_get(args, "mlp", "swiglu"), "swiglu"),
-            dropout=_as_float(_get(args, "dropout", 0.0), 0.0),
-            steps=_as_int(_get(args, "steps", -1), -1),
-            optimizer=_as_str(_get(args, "optimizer", "adamw"), "adamw"),
-            lr=_as_float(_get(args, "lr", 3e-4), 3e-4),
-            weight_decay=_as_float(_get(args, "weight_decay", 0.1), 0.1),
-            lr_schedule=_as_str(_get(args, "lr_schedule", "cosine"), "cosine"),
-            warmup_steps=_as_int(_get(args, "warmup_steps", 0), 0),
-            min_lr=_as_float(_get(args, "min_lr", 0.0), 0.0),
-            adam_eps=_as_float(_get(args, "adam_eps", 1e-8), 1e-8),
-            adam_betas=_as_str(_get(args, "adam_betas", "0.9,0.95"), "0.9,0.95"),
-            lion_betas=_as_str(_get(args, "lion_betas", "0.9,0.99"), "0.9,0.99"),
-            opt_foreach=bool(_get(args, "opt_foreach", False)),
-            opt_fused=bool(_get(args, "opt_fused", False)),
-            eval_iters=_as_int(_get(args, "eval_iters", 20), 20),
-            eval_every=_as_int(_get(args, "eval_every", 0), 0),
-            save_every=_as_int(_get(args, "save_every", 0), 0),
-            log_every=_as_int(_get(args, "log_every", 0), 0),
-            seq_schedule=(_as_str(_get(args, "seq_schedule", ""), "") or None),
-            batch_schedule=(_as_str(_get(args, "batch_schedule", ""), "") or None),
-            batch_by_seq=(_as_str(_get(args, "batch_by_seq", ""), "") or None),
-            batch_size=_as_int(_get(args, "batch_size", 0), 0),
-            grad_accum=_as_int(_get(args, "grad_accum", 0), 0),
-            resume=bool(_get(args, "resume", False)),
-            resume_path=(_as_str(_get(args, "resume_path", ""), "") or None),
-            resume_allow_config_mismatch=bool(_get(args, "resume_allow_config_mismatch", False)),
-            nan_policy=_as_str(_get(args, "nan_policy", "reduce_lr"), "reduce_lr"),
-            nan_lr_decay=_as_float(_get(args, "nan_lr_decay", 0.5), 0.5),
-            grad_clip=_as_float(_get(args, "grad_clip", 0.0), 0.0),
-            sync_timing=bool(_get(args, "sync_timing", False)),
-            legacy_micro_steps=bool(_get(args, "legacy_micro_steps", False)),
+            out_dir=common.out_dir,
+            instrument=common.instrument,
+            live_plot=common.live_plot,
+            tb=common.tb,
+            wandb=common.wandb,
+            data=_as_str(_get(d, "data", ""), ""),
+            vocab_size=_as_opt_int(_get(d, "vocab_size", None)),
+            tokenizer=_as_str(_get(d, "tokenizer", "raw"), "raw"),
+            data_format=_as_str(_get(d, "data_format", "auto"), "auto"),
+            data_dtype=_as_str(_get(d, "data_dtype", "int64"), "int64"),
+            val_frac=_as_float(_get(d, "val_frac", 0.1), 0.1),
+            block=_as_int(_get(d, "block", 0), 0),
+            layers=_as_int(_get(d, "layers", 0), 0),
+            n_head=_as_int(_get(d, "n_head", 0), 0),
+            kv_head=_as_opt_int(_get(d, "kv_head", None)),
+            d_model=_as_int(_get(d, "d_model", 0), 0),
+            d_ff=_as_int(_get(d, "d_ff", 0), 0),
+            embed_dim=_as_int(_get(d, "embed_dim", 0), 0),
+            attn_mode=_as_str(_get(d, "attn_mode", ""), ""),
+            attn_dim=_as_int(_get(d, "attn_dim", 0), 0),
+            sem_dim=_as_int(_get(d, "sem_dim", 0), 0),
+            geo_dim=_as_int(_get(d, "geo_dim", 0), 0),
+            no_decoupled_gate=bool(_get(d, "no_decoupled_gate", False)),
+            no_rope=bool(_get(d, "no_rope", False)),
+            rope_base=_as_float(_get(d, "rope_base", 10000.0), 10000.0),
+            tie_qk=bool(_get(d, "tie_qk", False)),
+            null_attn=bool(_get(d, "null_attn", False)),
+            no_learned_temp=bool(_get(d, "no_learned_temp", False)),
+            mlp=_as_str(_get(d, "mlp", "swiglu"), "swiglu"),
+            dropout=_as_float(_get(d, "dropout", 0.0), 0.0),
+            steps=_as_int(_get(d, "steps", -1), -1),
+            optimizer=_as_str(_get(d, "optimizer", "adamw"), "adamw"),
+            lr=_as_float(_get(d, "lr", 3e-4), 3e-4),
+            weight_decay=_as_float(_get(d, "weight_decay", 0.1), 0.1),
+            lr_schedule=_as_str(_get(d, "lr_schedule", "cosine"), "cosine"),
+            warmup_steps=_as_int(_get(d, "warmup_steps", 0), 0),
+            min_lr=_as_float(_get(d, "min_lr", 0.0), 0.0),
+            adam_eps=_as_float(_get(d, "adam_eps", 1e-8), 1e-8),
+            adam_betas=_as_str(_get(d, "adam_betas", "0.9,0.95"), "0.9,0.95"),
+            lion_betas=_as_str(_get(d, "lion_betas", "0.9,0.99"), "0.9,0.99"),
+            opt_foreach=bool(_get(d, "opt_foreach", False)),
+            opt_fused=bool(_get(d, "opt_fused", False)),
+            eval_iters=_as_int(_get(d, "eval_iters", 20), 20),
+            eval_every=_as_int(_get(d, "eval_every", 0), 0),
+            save_every=_as_int(_get(d, "save_every", 0), 0),
+            log_every=_as_int(_get(d, "log_every", 0), 0),
+            seq_schedule=(_as_str(_get(d, "seq_schedule", ""), "") or None),
+            batch_schedule=(_as_str(_get(d, "batch_schedule", ""), "") or None),
+            batch_by_seq=(_as_str(_get(d, "batch_by_seq", ""), "") or None),
+            batch_size=_as_int(_get(d, "batch_size", 0), 0),
+            grad_accum=_as_int(_get(d, "grad_accum", 0), 0),
+            resume=bool(_get(d, "resume", False)),
+            resume_path=(_as_str(_get(d, "resume_path", ""), "") or None),
+            resume_allow_config_mismatch=bool(_get(d, "resume_allow_config_mismatch", False)),
+            nan_policy=_as_str(_get(d, "nan_policy", "reduce_lr"), "reduce_lr"),
+            nan_lr_decay=_as_float(_get(d, "nan_lr_decay", 0.5), 0.5),
+            grad_clip=_as_float(_get(d, "grad_clip", 0.0), 0.0),
+            sync_timing=bool(_get(d, "sync_timing", False)),
+            legacy_micro_steps=bool(_get(d, "legacy_micro_steps", False)),
         )

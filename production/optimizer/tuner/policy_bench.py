@@ -15,6 +15,17 @@ from production.optimizer.tuner.decode_plan import KVDecodePlan
 from production.optimizer.tuner.triton_availability import TRITON_AVAILABLE
 
 
+def _get_int_attr(o: object, name: str, default: int) -> int:
+    v = getattr(o, name, None)
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return int(v)
+    if isinstance(v, float):
+        return int(v)
+    return int(default)
+
+
 def supports_fused_q4q8q4(*, device: torch.device, attn: object, policy: KVCachePolicy) -> bool:
     """Whether fused kernels are *eligible* for this policy/device."""
     if not TRITON_AVAILABLE:
@@ -46,11 +57,11 @@ def bench_policy_ms(
 ) -> float:
     """Benchmark decode latency for a given cache `policy` at `prefix_len`."""
     batch_size = int(batch_size)
-    head_count = int(getattr(attn, "H", int(getattr(model_cfg, "n_head"))))
+    head_count = _get_int_attr(attn, "H", _get_int_attr(model_cfg, "n_head", 1))
 
-    sem_dim = int(getattr(model_cfg, "sem_dim"))
-    geo_dim = int(getattr(model_cfg, "geo_dim"))
-    attn_dim = int(getattr(model_cfg, "attn_dim"))
+    sem_dim = _get_int_attr(model_cfg, "sem_dim", 0)
+    geo_dim = _get_int_attr(model_cfg, "geo_dim", 0)
+    attn_dim = _get_int_attr(model_cfg, "attn_dim", 0)
 
     sem_hd = int(getattr(attn, "sem_head_dim", sem_dim // max(1, head_count)))
     geo_hd = int(getattr(attn, "geo_head_dim", geo_dim // max(1, head_count)))
@@ -78,7 +89,7 @@ def bench_policy_ms(
         k_sem = torch.randn((batch_size, prefix_len, sem_dim), device=device, dtype=torch.float16)
         k_geo = torch.randn((batch_size, prefix_len, geo_dim), device=device, dtype=torch.float16)
         v = torch.randn((batch_size, prefix_len, attn_dim), device=device, dtype=torch.float16)
-        cache.append(k_sem, k_geo, v)
+        _ = cache.append(k_sem, k_geo, v)
 
     q_sem = torch.randn((batch_size, head_count, 1, sem_hd), device=device, dtype=torch.float16)
     q_geo = torch.randn((batch_size, head_count, 1, geo_hd), device=device, dtype=torch.float16)
@@ -95,7 +106,9 @@ def bench_policy_ms(
         if supports_fused_q4q8q4(device=device, attn=attn, policy=policy):
             fused_menu += ["triton1pass", "triton2pass"]
 
-    decode_blocks = cfg.decode_blocks if cfg.scope in ("decode", "all") else (int(base_decode_block),)
+    decode_blocks = (
+        cfg.decode_blocks if cfg.scope in ("decode", "all") else (int(base_decode_block),)
+    )
     decode_blocks = tuple(int(x) for x in decode_blocks if int(x) > 0)
 
     best = float("inf")
@@ -141,5 +154,3 @@ def bench_policy_ms(
             if ms < best:
                 best = ms
     return float(best)
-
-

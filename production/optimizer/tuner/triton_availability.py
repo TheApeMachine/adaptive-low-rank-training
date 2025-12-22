@@ -4,13 +4,9 @@ from __future__ import annotations
 
 __all__ = ["TRITON_AVAILABLE", "_triton_decoupled_q4q8q4_available"]
 
+import importlib.util
 
-try:
-    import triton  # noqa: F401
-
-    TRITON_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
-    TRITON_AVAILABLE = False
+TRITON_AVAILABLE: bool = importlib.util.find_spec("triton") is not None
 
 
 def triton_decoupled_q4q8q4_available() -> bool:

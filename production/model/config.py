@@ -8,11 +8,16 @@ the configuration. This helps a lot while running experiments.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Literal
+from collections.abc import Mapping
 
 import torch
+
+# Chinchilla scaling: optimal tokens per parameter
+CHINCHILLA_TOKENS_PER_PARAM: float = 20.0
 
 
 class Mode(Enum):
@@ -33,120 +38,412 @@ class ModelConfig:
     same time grouping some of the easier self-optimization steps.
     """
 
-    def __init__(self, device: torch.device | None = None) -> None:
-        self.device: torch.device = device if device is not None else torch.device("cpu")
-        self.vocab_size: int = 0
-        self.block_size: int = 0
+    device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
-        self.n_layer: int = 0
-        self.n_head: int = 0
-        self.kv_head: int | None = None  # for GQA: number of KV heads (defaults to n_head)
-        self.d_model: int = 0
-        self.dim_multiplier: int = 0
-        self.d_ff: int = 0
+    vocab_size: int = 0
+    block_size: int = 0
 
-        self.embed_dim: int = 0  # lexical bottleneck if < d_model
+    # Head selection policy:
+    # - "standard": prefer common head counts (more conventional + often faster on GPUs)
+    # - "any": allow any divisor of d_model (max flexibility)
+    head_policy: Literal["standard", "any"] = "standard"
 
-        self.attn_mode: Mode = Mode.BOTTLENECK
-        self.attn_dim: int = 0
-        self.head_dim: int = 0
-        self.sem_dim: int = 0
-        self.geo_dim: int = 0
+    n_layer: int = 0
+    n_head: int = 0
+    kv_head: int | None = None  # for GQA: number of KV heads (defaults to n_head)
+    d_model: int = 0
+    dim_multiplier: int = 0
+    d_ff: int = 0
 
-        self.decoupled_gate: bool = True
+    embed_dim: int = 0  # lexical bottleneck if < d_model
 
-        self.rope: bool = True
-        self.rope_base: float = 10000.0
+    # Canonical attention mode string (legacy-friendly): {"standard","gqa","bottleneck","decoupled"}.
+    # We keep it stringly-typed because configs are serialized through JSON-like dicts and the
+    # public surface (tests, harnesses, ckpts) expects strings.
+    attn_mode: str = "bottleneck"
+    attn_dim: int = 0
+    head_dim: int = 0
+    sem_dim: int = 0
+    geo_dim: int = 0
 
-        self.tie_qk: bool = False
-        self.null_attn: bool = False
-        self.learned_temp: bool = True
+    decoupled_gate: bool = True
 
-        self.mlp: Literal["swiglu", "gelu"] = "swiglu"
-        self.dropout: float = 0.0
+    rope: bool = True
+    rope_base: float = 10000.0
 
-    def optimize(self) -> None:
+    tie_qk: bool = False
+    null_attn: bool = False
+    learned_temp: bool = True
+
+    mlp: Literal["swiglu", "gelu"] = "swiglu"
+    dropout: float = 0.0
+
+    def __post_init__(self) -> None:
+        # Normalize device inputs (some checkpoints store device as string).
+        dev = self.device
+        if isinstance(dev, str):
+            try:
+                self.device = torch.device(str(dev))
+            except (TypeError, ValueError):
+                self.device = torch.device("cpu")
+        elif not torch.device:
+            self.device = torch.device("cpu")
+
+        # Normalize mode strings / enum values.
+        self.attn_mode = _normalize_attn_mode(self.attn_mode)
+
+        hp = str(self.head_policy or "standard").strip().lower()
+        if hp not in ("standard", "any"):
+            hp = "standard"
+        self.head_policy = hp
+
+        mlp = str(self.mlp or "swiglu").strip().lower()
+        self.mlp = "gelu" if mlp == "gelu" else "swiglu"
+
+        # Keep dropout in a sane range.
+        try:
+            self.dropout = float(self.dropout)
+        except (TypeError, ValueError):
+            self.dropout = 0.0
+        if not math.isfinite(self.dropout):
+            self.dropout = 0.0
+        self.dropout = float(min(max(self.dropout, 0.0), 1.0))
+
+    @classmethod
+    def from_dict(cls, cfg: Mapping[str, object], *, device: torch.device | None = None) -> "ModelConfig":
+        """Load config from a mapping, ignoring unknown keys (ckpt back-compat)."""
+        def _as_int(o: object, default: int) -> int:
+            if isinstance(o, bool):
+                return int(o)
+            if isinstance(o, int):
+                return int(o)
+            if isinstance(o, float):
+                return int(o)
+            if isinstance(o, str):
+                try:
+                    return int(o.strip())
+                except ValueError:
+                    return int(default)
+            return int(default)
+
+        def _as_float(o: object, default: float) -> float:
+            if isinstance(o, bool):
+                return float(int(o))
+            if isinstance(o, (int, float)):
+                return float(o)
+            if isinstance(o, str):
+                try:
+                    return float(o.strip())
+                except ValueError:
+                    return float(default)
+            return float(default)
+
+        def _as_bool(o: object, default: bool) -> bool:
+            if isinstance(o, bool):
+                return bool(o)
+            if isinstance(o, int):
+                return bool(o != 0)
+            if isinstance(o, str):
+                s = o.strip().lower()
+                if s in ("1", "true", "t", "yes", "y", "on"):
+                    return True
+                if s in ("0", "false", "f", "no", "n", "off"):
+                    return False
+            return bool(default)
+
+        def _as_device(o: object, default: torch.device) -> torch.device:
+            if isinstance(o, torch.device):
+                return o
+            if isinstance(o, str):
+                try:
+                    return torch.device(o)
+                except (TypeError, ValueError):
+                    return default
+            return default
+
+        raw = dict(cfg)
+        allowed = {f.name for f in fields(cls)}
+        filtered: dict[str, object] = {str(k): v for k, v in raw.items() if str(k) in allowed}
+
+        # Construct with known-typed values (no **kwargs of object-typed dict).
+        inst = cls(device=device if device is not None else _as_device(filtered.get("device", "cpu"), torch.device("cpu")))
+
+        for k, v in filtered.items():
+            if k == "device":
+                # device is handled during inst creation (and may be overridden by the arg).
+                continue
+            match k:
+                case "vocab_size":
+                    inst.vocab_size = _as_int(v, 0)
+                case "block_size":
+                    inst.block_size = _as_int(v, 0)
+                case "head_policy":
+                    hp = str(v).strip().lower()
+                    inst.head_policy = "any" if hp == "any" else "standard"
+                case "n_layer":
+                    inst.n_layer = _as_int(v, 0)
+                case "n_head":
+                    inst.n_head = _as_int(v, 0)
+                case "kv_head":
+                    inst.kv_head = None if v is None else _as_int(v, 0)
+                case "d_model":
+                    inst.d_model = _as_int(v, 0)
+                case "dim_multiplier":
+                    inst.dim_multiplier = _as_int(v, 0)
+                case "d_ff":
+                    inst.d_ff = _as_int(v, 0)
+                case "embed_dim":
+                    inst.embed_dim = _as_int(v, 0)
+                case "attn_mode":
+                    inst.attn_mode = _normalize_attn_mode(v)
+                case "attn_dim":
+                    inst.attn_dim = _as_int(v, 0)
+                case "head_dim":
+                    inst.head_dim = _as_int(v, 0)
+                case "sem_dim":
+                    inst.sem_dim = _as_int(v, 0)
+                case "geo_dim":
+                    inst.geo_dim = _as_int(v, 0)
+                case "decoupled_gate":
+                    inst.decoupled_gate = _as_bool(v, True)
+                case "rope":
+                    inst.rope = _as_bool(v, True)
+                case "rope_base":
+                    inst.rope_base = _as_float(v, 10000.0)
+                case "tie_qk":
+                    inst.tie_qk = _as_bool(v, False)
+                case "null_attn":
+                    inst.null_attn = _as_bool(v, False)
+                case "learned_temp":
+                    inst.learned_temp = _as_bool(v, True)
+                case "mlp":
+                    mlp = str(v).strip().lower()
+                    inst.mlp = "gelu" if mlp == "gelu" else "swiglu"
+                case "dropout":
+                    inst.dropout = _as_float(v, 0.0)
+                case _:
+                    # Unknown/unsupported key (or a field we don't want to restore).
+                    pass
+
+        # Re-run post-init normalization (for fields we set after construction).
+        inst.__post_init__()
+        return inst
+
+    def optimize(self, target_params: int) -> None:
         """
-        optimize the main model dimensions based on the task entropy and model capacity.
+        Pure calculation: derive architecture from entropy + budget deterministically.
+        No search, no scoring—just math.
         """
-        self.fit_core_dims()
-        self.fit_n_layer()
-        self.fit_dimensions()
+        # Step 1: Depth from capacity (deterministic formula), unless already specified.
+        # Why: paper harness encodes depth in run_id/out_dir (e.g. `_l22_...`) and we
+        # want that to remain a first-class intent without adding more CLI flags.
+        if int(self.n_layer) > 0:
+            n_layer: int = int(self.n_layer)
+        else:
+            log_params: float = math.log10(float(max(1, target_params)))
+            # 1M→4, 5M→6, 10M→8, 50M→10, 100M→12, 500M→14, 1B→16
+            n_layer = max(4, int(2 + 2 * log_params - 11.0))
 
-    def fit_n_layer(self) -> None:
-        """
-        fit_n_layer decides the number of layers for the model based on the task
-        entropy and the model capacity.
-        """
-        # More depth for width + semantic variety; less depth for long contexts.
-        self.n_layer = int(
-            (self.d_model / self.n_head) +
-            (self.vocab_size.bit_length() // 2) -
-            (self.block_size.bit_length() // 2)
-        ) + 2
+        # Step 2: Entropy signals (data-driven ratios)
+        v: float = math.log2(float(self.vocab_size) + 1.0)
+        b: float = math.log2(float(self.block_size) + 1.0)
+        task: float = v / (v + b)  # lexical dominance
+        ctx: float = b / (v + b)   # context dominance
 
-    def derive_n_head(self, d_model: int) -> int:
-        """
-        attention heads must evenly partition the model width; we choose the
-        divisor that best matches an entropy-driven target head resolution.
-        """
-        target = (
-            self.vocab_size.bit_length() + self.block_size.bit_length()
-        ) * self.dim_multiplier
-        
-        return min(
-            [i for i in range(1, d_model + 1) if d_model % i == 0],
-            key=lambda i: abs(d_model // i - target)
-        )
+        target_head_dim: int = int(round(64.0 + 64.0 * task))
+        mlp_ratio: float = 2.5 + 3.5 * task
+        attn_ratio: float = 0.55 + 0.45 * task
 
-    def fit_core_dims(self) -> None:
-        """
-        set width, head count, MLP expansion, and embedding bottleneck from
-        task entropy + model capacity so we avoid brittle, static ratios.
-        """
-        v_bits, b_bits = self.vocab_size.bit_length(), self.block_size.bit_length()
+        # Step 3: Solve for d_model given budget
+        # Prefer less aggressive embed compression for better quality
+        mlp_mult: float = 3.0   # SwiGLU param multiplier
+        attn_mult: float = 4.0  # q,k,v,o param multiplier
 
-        # 1. Model Width: Scales with total entropy, boosted by semantic density.
-        self.d_model = (v_bits + b_bits) << (v_bits // 4)
+        solution = None
+        for embed_ratio in [0.15, 0.2, 0.3, 0.4, 0.5, 0.7, 1.0]:  # Start higher
+            # Try both tied and untied lm_head
+            for tie_lm in [True, False]:
+                result = self._solve_width(
+                    target_params=target_params,
+                    n_layer=n_layer,
+                    embed_ratio=embed_ratio,
+                    attn_ratio=attn_ratio,
+                    mlp_ratio=mlp_ratio,
+                    mlp_mult=mlp_mult,
+                    attn_mult=attn_mult,
+                    tie_lm=tie_lm,
+                )
+                if result is not None:
+                    solution = result
+                    break
+            if solution is not None:
+                break
 
-        # 2. Resolution multiplier scales with the model's total bit-depth.
-        self.dim_multiplier = self.d_model.bit_length() // 2
-        self.n_head = self.derive_n_head(self.d_model)
+        if solution is None:
+            msg = (
+                f"Auto-fit failed: no feasible solution for target_params={target_params}, "
+                f"vocab_size={self.vocab_size}, block_size={self.block_size}"
+            )
+            raise ValueError(msg)
 
-        # 3. MLP Expansion: Scales with the 'Meaning Bits' (semantic complexity) of the task.
-        self.d_ff = self.d_model * max(2, v_bits // 4)
+        d_model, embed_dim, attn_dim, d_ff = solution
 
-        # 4. Lexical Bottleneck: Scales bitwise with the information gap between model and vocab.
-        self.embed_dim = self.d_model >> max(0, self.d_model.bit_length() - v_bits)
+        # Step 4: Heads from width (deterministic)
+        n_head: int = self._pick_n_head(d_model, target_head_dim)
+        head_dim: int = d_model // n_head
 
-    def fit_dimensions(self) -> None:
-        """
-        attention width and its semantic/geometric split depend on the chosen
-        attention architecture (baseline/bottleneck/decoupled/GQA).
-        """
-        self.attn_dim = self.attn_dim_for_mode()
+        # Fix attn_dim to be compatible with n_head (solver doesn't know n_head yet)
+        # For decoupled+RoPE, need both splits divisible by n_head
+        if _normalize_attn_mode(self.attn_mode) == "decoupled" and bool(self.rope):
+            attn_dim = self._round_to_multiple(attn_dim, 2 * n_head)
+        else:
+            attn_dim = self._round_to_multiple(attn_dim, n_head)
+
+        # Step 5: Mode-specific splits (structural)
+        if _normalize_attn_mode(self.attn_mode) == "decoupled":
+            geo_share: float = ctx * 0.45
+            geo_dim: int = int(round(attn_dim * geo_share))
+            geo_dim = self._round_to_multiple(geo_dim, n_head)
+            if bool(self.rope):
+                geo_dim = self._round_to_multiple(geo_dim, 2 * n_head)
+            sem_dim: int = attn_dim - geo_dim
+        else:
+            geo_dim = 0
+            sem_dim = attn_dim
+
+        self.d_model = d_model
+        self.n_head = n_head
+        self.n_layer = n_layer
+        self.head_dim = head_dim
+        self.attn_dim = attn_dim
+        self.d_ff = d_ff
+        self.embed_dim = embed_dim
+        self.sem_dim = sem_dim
+        self.geo_dim = geo_dim
         self.kv_head = self.kv_head_for_mode()
-        self.head_dim = self.attn_dim // max(1, self.n_head)
-        self.geo_dim = self.geo_dim_for_mode()
-        self.sem_dim = self.attn_dim - self.geo_dim
 
-    def attn_dim_for_mode(self) -> int:
-        """bottleneck tightens as context cost increases relative to semantic variety."""
-        v, b = self.vocab_size.bit_length(), self.block_size.bit_length()
-        return self.d_model * v // b // self.n_head * self.n_head if self.attn_mode in (
-            Mode.BOTTLENECK, Mode.DECOUPLED
-        ) else self.d_model
+    def _solve_width(
+        self,
+        *,
+        target_params: int,
+        n_layer: int,
+        embed_ratio: float,
+        attn_ratio: float,
+        mlp_ratio: float,
+        mlp_mult: float,
+        attn_mult: float,
+        tie_lm: bool,
+    ) -> tuple[int, int, int, int] | None:
+        """
+        Solve for d_model given budget and ratios.
+
+        P_total ≈ vocab*embed_dim + embed_proj + n_layer*P_block + lm_head
+
+        Where:
+          embed_dim = embed_ratio * d_model
+          attn_dim = attn_ratio * d_model
+          d_ff = mlp_ratio * d_model
+          P_block = attn_mult * d_model * attn_dim + mlp_mult * d_model * d_ff
+
+        This is quadratic in d_model; we can solve or binary search.
+        """
+        vocab: int = self.vocab_size
+
+        # Coefficients for quadratic: a*d² + b*d + c = 0, where we want P_total = target_params
+        # P_embed = vocab * (embed_ratio * d) + (embed_ratio * d) * d = vocab*embed_ratio*d + embed_ratio*d²
+        # P_block = attn_mult*d*(attn_ratio*d) + mlp_mult*d*(mlp_ratio*d) = (attn_mult*attn_ratio + mlp_mult*mlp_ratio)*d²
+        # P_lm = vocab*d if not tied, else 0
+
+        a: float = embed_ratio + n_layer * (attn_mult * attn_ratio + mlp_mult * mlp_ratio)
+        b: float = vocab * embed_ratio + (0 if tie_lm else vocab)
+        c: float = -float(target_params)
+
+        # Quadratic formula
+        discriminant: float = b * b - 4 * a * c
+        if discriminant < 0:
+            return None
+
+        d_model_raw: float = (-b + math.sqrt(discriminant)) / (2 * a)
+        if d_model_raw < 32:
+            return None
+
+        # Round to a device-appropriate multiple to ensure sane head divisors.
+        # Why: if d_model is "prime-ish" (few divisors), `_pick_n_head` can only
+        # choose extreme head counts, producing pathological head_dim (e.g. 8).
+        d_model_multiple: int = 8
+        try:
+            if str(getattr(self.device, "type", "cpu")) == "cuda":
+                d_model_multiple = 128
+            elif str(getattr(self.device, "type", "cpu")) == "mps":
+                d_model_multiple = 64
+        except (AttributeError, TypeError, ValueError):
+            d_model_multiple = 8
+
+        d_model: int = self._round_to_multiple(int(d_model_raw), int(d_model_multiple))
+        embed_dim: int = self._round_to_multiple(max(32, int(d_model * embed_ratio)), 8)
+        attn_dim: int = self._round_to_multiple(int(d_model * attn_ratio), 4)  # divisible by heads later
+        d_ff: int = self._round_to_multiple(int(d_model * mlp_ratio), 8)
+
+        # Verify it fits budget
+        p_check = self._estimate_embed_params(vocab, d_model, embed_dim, tie_lm) + n_layer * self._estimate_block_params(d_model, attn_dim, d_ff, mlp_mult, attn_mult)
+        if p_check > target_params * 1.15:  # Allow 15% overshoot
+            return None
+
+        return (d_model, embed_dim, attn_dim, d_ff)
+
+    def _round_to_multiple(self, x: int, m: int) -> int:
+        return max(m, (x // m) * m)
+
+    def _pick_n_head(self, d_model: int, target_head_dim: int) -> int:
+        divs = [h for h in range(1, d_model + 1) if d_model % h == 0]
+        if not divs:
+            return 1
+
+        if self.head_policy == "any":
+            return min(divs, key=lambda h: abs((d_model // h) - target_head_dim))
+
+        # "standard": prefer a conventional set when feasible; otherwise fall back to any divisor.
+        preferred = [4, 6, 8, 12, 16, 24, 32, 40, 48, 64]
+        preferred_divs = [h for h in preferred if d_model % h == 0]
+        candidates = preferred_divs if preferred_divs else divs
+        return min(candidates, key=lambda h: abs((d_model // h) - target_head_dim))
+
+    def _estimate_embed_params(self, vocab: int, d_model: int, embed_dim: int, tie_lm_head: bool) -> int:
+        p = vocab * embed_dim
+        if embed_dim != d_model:
+            p += embed_dim * d_model
+        if not tie_lm_head:
+            p += vocab * d_model
+        return int(p)
+
+    def _estimate_block_params(self, d_model: int, attn_dim: int, d_ff: int, mlp_mult: float, attn_mult: float) -> int:
+        p_attn = attn_mult * d_model * attn_dim
+        p_mlp = mlp_mult * d_model * d_ff
+        return int(p_attn + p_mlp)
 
     def kv_head_for_mode(self) -> int | None:
         """GQA reduces KV bandwidth by sharing KV across query heads when it is safe."""
-        return self.n_head // max(
-            1, self.block_size.bit_length() // self.n_layer
-        ) if self.attn_mode == Mode.GQA else None
+        if _normalize_attn_mode(self.attn_mode) != "gqa":
+            return None
+        # Heuristic: reduce KV heads when the context is long relative to depth (attention is dominated by bandwidth).
+        try:
+            denom = max(1, int(self.block_size).bit_length() // max(1, int(self.n_layer)))
+        except (TypeError, ValueError, AttributeError):
+            denom = 1
+        kv = int(max(1, int(self.n_head) // int(denom)))
+        # Ensure kv_head divides n_head.
+        nh = int(max(1, int(self.n_head)))
+        while kv > 1 and (nh % kv) != 0:
+            kv -= 1
+        return int(max(1, kv))
 
-    def geo_dim_for_mode(self) -> int:
-        """decoupled attention allocates some capacity to position/geometry; RoPE prefers even dims."""
-        if self.attn_mode != Mode.DECOUPLED:
-            return 0
-        v, b = self.vocab_size.bit_length(), self.block_size.bit_length()
-        geo = (self.attn_dim // self.n_head) * b // (v + b)
-        return (geo & ~1 if self.rope else geo) * self.n_head
+
+def _normalize_attn_mode(mode: object) -> str:
+    """Best-effort normalization of attention mode inputs (strings, enums)."""
+    v = getattr(mode, "value", mode)
+    s = str(v or "").strip().lower()
+    if s in ("baseline", "standard", "base"):
+        return "standard"
+    if s in ("gqa", "bottleneck", "decoupled"):
+        return s
+    return "bottleneck"

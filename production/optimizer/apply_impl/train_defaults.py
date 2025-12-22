@@ -42,6 +42,15 @@ class TrainingDefaultsDeriver:
         if not hasattr(args, "data_dtype"):
             o.set("data_dtype", "int64")
 
+        # Intent-first default: enable W&B unless explicitly disabled.
+        # The CLI uses BooleanOptionalAction so `args.wandb` may be None/True/False.
+        try:
+            wandb_raw = getattr(args, "wandb", None)
+        except Exception:
+            wandb_raw = None
+        if wandb_raw is None:
+            o.set("wandb", True)
+
         # Model fields are intentionally set to 0/"" so the model config can self-optimize.
         for name, val in [
             ("layers", int(L)),
@@ -106,7 +115,9 @@ class TrainingDefaultsDeriver:
         if not hasattr(args, "save_every"):
             o.set("save_every", 0)
         if not hasattr(args, "log_every"):
-            o.set("log_every", 0)
+            # Default to periodic progress logs (the intent-first CLI doesn't expose
+            # low-level logging knobs, but silent training is confusing in practice).
+            o.set("log_every", 10)
 
         # Stable run-id naming keeps artifacts searchable without extra flags.
         if not o.get("out_dir") and exp0:

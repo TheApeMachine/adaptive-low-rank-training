@@ -7,6 +7,8 @@ benchmarking to helper modules in `production.optimizer.tuner.*`.
 
 from __future__ import annotations
 
+import torch
+
 from production.optimizer.tuner.buckets import pow2_bucket
 from production.optimizer.tuner.cache_estimates import as_mb
 from production.optimizer.tuner.cache_policy import KVCachePolicy
@@ -25,7 +27,7 @@ class KVCachePolicySelfOptimizer:
         self,
         cfg: KVSelfOptConfig,
         *,
-        device,
+        device: torch.device,
         attn: object,
         model_cfg: object,
         batch_size: int,
@@ -35,7 +37,7 @@ class KVCachePolicySelfOptimizer:
         base_fused: str,
     ) -> None:
         self.cfg: KVSelfOptConfig = cfg
-        self.device = device
+        self.device: torch.device = device
         self.attn: object = attn
         self.model_cfg: object = model_cfg
         self.batch_size: int = int(batch_size)
@@ -44,7 +46,7 @@ class KVCachePolicySelfOptimizer:
         self.base_decode_block: int = int(base_decode_block)
         self.base_fused: str = str(base_fused)
 
-        self._store = PolicyStore(cfg.cache_path)
+        self._store: PolicyStore = PolicyStore(cfg.cache_path)
 
     def update_cached_policy(self, policy: KVCachePolicy) -> None:
         """Overwrite the persisted cache policy for this hardware/model key."""
@@ -100,7 +102,7 @@ class KVCachePolicySelfOptimizer:
                     policy=cached,
                     prefix_len=min(self.max_seq_len - 1, max(1, int(prompt_len))),
                     best_ms=float("nan"),
-                    budget_bytes=budget,
+                    budget_b=budget,
                     policy_bytes=pb,
                     note="cached",
                 )
@@ -171,10 +173,11 @@ class KVCachePolicySelfOptimizer:
             for ms, mb, p in scored:
                 if ms < best_ms * (1.0 - float(self.cfg.policy_hysteresis)):
                     if self.cfg.verbose:
-                        print(
+                        msg = (
                             f"[selfopt] cache-policy step: {best.short()} -> {p.short()} "
                             f"({best_ms:.3f}ms -> {ms:.3f}ms, mem={as_mb(mb):.1f}MB)"
                         )
+                        print(msg)
                     best = p
                     best_ms = ms
                     improved = True
@@ -202,11 +205,12 @@ class KVCachePolicySelfOptimizer:
                     m = mem_bytes(p)
                     if m < cur_mem:
                         if self.cfg.verbose:
-                            print(
+                            msg = (
                                 f"[selfopt] cache-policy tie-break: {best.short()} -> {p.short()} "
                                 f"(ms={ms:.3f} within {self.cfg.prefer_lower_mem_within*100:.1f}%, "
                                 f"mem {as_mb(cur_mem):.1f}MB -> {as_mb(m):.1f}MB)"
                             )
+                            print(msg)
                         best = p
                         cur_mem = m
 
@@ -217,7 +221,7 @@ class KVCachePolicySelfOptimizer:
             policy=best,
             prefix_len=prefix_len,
             best_ms=best_ms,
-            budget_bytes=budget,
+            budget_b=budget,
             policy_bytes=mem_bytes(best),
             note="chosen",
         )
@@ -342,14 +346,15 @@ class KVCachePolicySelfOptimizer:
         policy: KVCachePolicy,
         prefix_len: int,
         best_ms: float,
-        budget_bytes: int,
+        budget_b: int,
         policy_bytes: int,
         note: str,
     ) -> None:
-        print(
+        msg = (
             f"[selfopt] cache-policy {note}: {policy.short()} "
-            f"(mem={as_mb(policy_bytes):.1f}MB <= {as_mb(budget_bytes):.1f}MB, "
+            f"(mem={as_mb(policy_bytes):.1f}MB <= {as_mb(budget_b):.1f}MB, "
             f"prefix_len={int(prefix_len)}, best_ms={float(best_ms):.3f})"
         )
+        print(msg)
 
 

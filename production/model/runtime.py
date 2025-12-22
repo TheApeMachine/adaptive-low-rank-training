@@ -16,10 +16,19 @@ from production.runtime_tuning import KVDecodeSelfOptimizer
 
 from .cache import Cache
 from .policy import Policy, Model as PolicyModel
-from .config import Mode
 
 if TYPE_CHECKING:
     from production.runtime_tuning import KVSelfOptConfig
+
+
+def _normalize_attn_mode(mode: object) -> str:
+    v = getattr(mode, "value", mode)
+    s = str(v or "").strip().lower()
+    if s in ("baseline", "standard", "base"):
+        return "standard"
+    if s in ("gqa", "bottleneck", "decoupled"):
+        return s
+    return "bottleneck"
 
 class KVRuntime:
     """Runtime environment for KV cache management."""
@@ -94,7 +103,7 @@ class Runtime:
 
         # 2. Selection
         if (self_opt and self_opt.mode != "none" and self_opt.scope in ("cache", "all")
-                and self.model.cfg.attn_mode == Mode.DECOUPLED):
+                and _normalize_attn_mode(getattr(self.model.cfg, "attn_mode", "bottleneck")) == "decoupled"):
             k_sem, k_geo, v, promote, residual = self.policy.select(
                 prompt, self_opt, k_sem=k_sem, k_geo=k_geo, v=v,
                 residual=kv_residual,

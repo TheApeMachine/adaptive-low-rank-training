@@ -1,6 +1,8 @@
-from __future__ import annotations
+"""
+Small helpers for device memory/allocator hygiene and measurement.
+"""
 
-from typing import Dict, Optional
+from __future__ import annotations
 
 import torch
 
@@ -13,7 +15,7 @@ def device_synchronize(dev: torch.device) -> None:
         elif dev.type == "mps":
             if hasattr(torch, "mps") and hasattr(torch.mps, "synchronize"):
                 torch.mps.synchronize()
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError):
         pass
 
 
@@ -25,7 +27,7 @@ def empty_device_cache(dev: torch.device) -> None:
         elif dev.type == "mps":
             if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
                 torch.mps.empty_cache()
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError):
         pass
 
 
@@ -34,17 +36,17 @@ def reset_peak_memory_stats(dev: torch.device) -> None:
     try:
         if dev.type == "cuda" and torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(dev)
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError):
         pass
 
 
-def get_device_mem_stats(dev: torch.device, *, include_cuda_peaks: bool = True) -> Dict[str, float]:
+def get_device_mem_stats(dev: torch.device, *, include_cuda_peaks: bool = True) -> dict[str, float]:
     """Return a device-specific snapshot of memory counters in bytes.
 
     - CUDA: allocated/reserved (+ optional peaks)
     - MPS: current_allocated_memory/driver_allocated_memory
     """
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     try:
         if dev.type == "cuda" and torch.cuda.is_available():
             out["cuda_mem_alloc_bytes"] = float(torch.cuda.memory_allocated(dev))
@@ -58,21 +60,21 @@ def get_device_mem_stats(dev: torch.device, *, include_cuda_peaks: bool = True) 
                     out["mps_mem_alloc_bytes"] = float(torch.mps.current_allocated_memory())
                 if hasattr(torch.mps, "driver_allocated_memory"):
                     out["mps_mem_driver_bytes"] = float(torch.mps.driver_allocated_memory())
-    except Exception:
+    except (AttributeError, RuntimeError, TypeError):
         pass
     return out
 
 
-def diff_mem_stats(after: Dict[str, float], before: Dict[str, float]) -> Dict[str, float]:
+def diff_mem_stats(after: dict[str, float], before: dict[str, float]) -> dict[str, float]:
     """Key-wise (after-before) for memory stat dicts."""
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     keys = set(before.keys()) | set(after.keys())
     for k in sorted(keys):
         out[k] = float(after.get(k, 0.0) - before.get(k, 0.0))
     return out
 
 
-def pick_primary_mem_key(dev: torch.device) -> Optional[str]:
+def pick_primary_mem_key(dev: torch.device) -> str | None:
     """Return the primary key to use for ratio computations (best effort)."""
     if dev.type == "cuda" and torch.cuda.is_available():
         return "cuda_mem_reserved_bytes"

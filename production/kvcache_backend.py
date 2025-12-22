@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
+from typing import Literal
 
 import torch
 import torch.nn.functional as F
@@ -64,7 +64,7 @@ def make_quantspec(kind: KVCacheKind, dim: int, qblock: int) -> QuantSpec:
     return QuantSpec(kind=kind, dim=dim, qblock=qb, pad_dim=pad_dim, n_blocks=n_blocks)
 
 
-def quantize_q8_0(x: torch.Tensor, spec: QuantSpec) -> Tuple[torch.Tensor, torch.Tensor]:
+def quantize_q8_0(x: torch.Tensor, spec: QuantSpec) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-block symmetric int8 with fp16 scale (absmax / 127)."""
     if spec.kind != "q8_0":
         raise ValueError(spec.kind)
@@ -102,7 +102,7 @@ def dequantize_q8_0(q: torch.Tensor, scale: torch.Tensor, spec: QuantSpec) -> to
     return x
 
 
-def quantize_q4_0(x: torch.Tensor, spec: QuantSpec) -> Tuple[torch.Tensor, torch.Tensor]:
+def quantize_q4_0(x: torch.Tensor, spec: QuantSpec) -> tuple[torch.Tensor, torch.Tensor]:
     """Q4_0-like: int4 packed into uint8, with fp16 scale per block."""
     if spec.kind != "q4_0":
         raise ValueError(spec.kind)
@@ -176,7 +176,7 @@ NF4_LEVELS = torch.tensor(
 )
 
 
-def quantize_nf4(x: torch.Tensor, spec: QuantSpec) -> Tuple[torch.Tensor, torch.Tensor]:
+def quantize_nf4(x: torch.Tensor, spec: QuantSpec) -> tuple[torch.Tensor, torch.Tensor]:
     """NF4: non-uniform 4-bit codebook quantization (pure PyTorch research impl)."""
     if spec.kind != "nf4":
         raise ValueError(spec.kind)
@@ -234,6 +234,18 @@ def dequantize_nf4(packed: torch.Tensor, scale: torch.Tensor, spec: QuantSpec) -
 class SeqCacheTensor:
     """A [B, max_seq_len, dim] sequence tensor stored in fp16/fp32/q8_0/q4_0/nf4."""
 
+    kind: KVCacheKind
+    device: torch.device
+    spec: QuantSpec
+    pos: int
+    max_seq_len: int
+    residual_len: int
+    _residual: torch.Tensor | None
+    _residual_len_eff: int
+    buf: torch.Tensor | None
+    q: torch.Tensor | None
+    s: torch.Tensor | None
+
     def __init__(
         self,
         *,
@@ -243,32 +255,40 @@ class SeqCacheTensor:
         cfg: KVCacheTensorConfig,
         device: torch.device,
     ):
-        self.kind: KVCacheKind = cfg.kind
+        self.kind = cfg.kind
         self.device = device
         self.spec = make_quantspec(cfg.kind, dim, cfg.qblock)
         self.pos = 0
-        self.max_seq_len = max_seq_len
+        self.max_seq_len = int(max_seq_len)
 
         self.residual_len = int(max(0, cfg.residual_len))
-        self._residual: Optional[torch.Tensor]
-        self._residual_len_eff = min(self.residual_len, max_seq_len) if self.residual_len > 0 else 0
+        self._residual = None
+        self._residual_len_eff = (
+            min(int(self.residual_len), int(self.max_seq_len)) if self.residual_len > 0 else 0
+        )
 
         if self.kind in ("fp16", "fp32"):
             dtype = torch.float16 if self.kind == "fp16" else torch.float32
-            self.buf = torch.empty((batch_size, max_seq_len, dim), device=device, dtype=dtype)
+            self.buf = torch.empty((int(batch_size), int(self.max_seq_len), int(dim)), device=device, dtype=dtype)
             self.q = None
             self.s = None
             self._residual = None
         elif self.kind == "q8_0":
             self.buf = None
-            self.q = torch.empty((batch_size, max_seq_len, self.spec.pad_dim), device=device, dtype=torch.int8)
-            self.s = torch.empty((batch_size, max_seq_len, self.spec.n_blocks), device=device, dtype=torch.float16)
-            self._residual = torch.empty((batch_size, self._residual_len_eff, dim), device=device, dtype=torch.float16) if self._residual_len_eff > 0 else None
+            self.q = torch.empty((int(batch_size), int(self.max_seq_len), int(self.spec.pad_dim)), device=device, dtype=torch.int8)
+            self.s = torch.empty((int(batch_size), int(self.max_seq_len), int(self.spec.n_blocks)), device=device, dtype=torch.float16)
+            self._residual = (
+                torch.empty((int(batch_size), int(self._residual_len_eff), int(dim)), device=device, dtype=torch.float16)
+                if self._residual_len_eff > 0 else None
+            )
         elif self.kind in ("q4_0", "nf4"):
             self.buf = None
-            self.q = torch.empty((batch_size, max_seq_len, self.spec.pad_dim // 2), device=device, dtype=torch.uint8)
-            self.s = torch.empty((batch_size, max_seq_len, self.spec.n_blocks), device=device, dtype=torch.float16)
-            self._residual = torch.empty((batch_size, self._residual_len_eff, dim), device=device, dtype=torch.float16) if self._residual_len_eff > 0 else None
+            self.q = torch.empty((int(batch_size), int(self.max_seq_len), int(self.spec.pad_dim // 2)), device=device, dtype=torch.uint8)
+            self.s = torch.empty((int(batch_size), int(self.max_seq_len), int(self.spec.n_blocks)), device=device, dtype=torch.float16)
+            self._residual = (
+                torch.empty((int(batch_size), int(self._residual_len_eff), int(dim)), device=device, dtype=torch.float16)
+                if self._residual_len_eff > 0 else None
+            )
         else:
             raise ValueError(self.kind)
 
@@ -293,7 +313,7 @@ class SeqCacheTensor:
         return self._residual.index_select(1, idx)
 
     def append(self, x_new: torch.Tensor) -> int:
-        B, Tn, D = x_new.shape
+        _b, Tn, D = x_new.shape
         if D != self.spec.dim:
             raise ValueError(f"dim mismatch: expected {self.spec.dim}, got {D}")
         if self.pos + Tn > self.max_seq_len:
@@ -301,19 +321,27 @@ class SeqCacheTensor:
         old = self.pos
 
         if self.kind in ("fp16", "fp32"):
-            self.buf[:, old : old + Tn] = x_new.to(self.buf.dtype)  # type: ignore[index]
+            if self.buf is None:
+                raise RuntimeError("Expected fp buffer for fp16/fp32 cache")
+            self.buf[:, old : old + Tn] = x_new.to(self.buf.dtype)
         elif self.kind == "q8_0":
             q, s = quantize_q8_0(x_new, self.spec)
-            self.q[:, old : old + Tn] = q  # type: ignore[index]
-            self.s[:, old : old + Tn] = s  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q8_0 cache")
+            self.q[:, old : old + Tn] = q
+            self.s[:, old : old + Tn] = s
         elif self.kind == "q4_0":
             q, s = quantize_q4_0(x_new, self.spec)
-            self.q[:, old : old + Tn] = q  # type: ignore[index]
-            self.s[:, old : old + Tn] = s  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q4_0 cache")
+            self.q[:, old : old + Tn] = q
+            self.s[:, old : old + Tn] = s
         elif self.kind == "nf4":
             q, s = quantize_nf4(x_new, self.spec)
-            self.q[:, old : old + Tn] = q  # type: ignore[index]
-            self.s[:, old : old + Tn] = s  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for nf4 cache")
+            self.q[:, old : old + Tn] = q
+            self.s[:, old : old + Tn] = s
         else:
             raise ValueError(self.kind)
 
@@ -358,13 +386,21 @@ class SeqCacheTensor:
 
         # Gather tail from authoritative storage (buf or quant buffers) without using the residual fast-path.
         if self.kind in ("fp16", "fp32"):
-            tail = self.buf[:, start:end].to(torch.float16)  # type: ignore[index]
+            if self.buf is None:
+                raise RuntimeError("Expected fp buffer for fp16/fp32 cache")
+            tail = self.buf[:, start:end].to(torch.float16)
         elif self.kind == "q8_0":
-            tail = dequantize_q8_0(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q8_0 cache")
+            tail = dequantize_q8_0(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)
         elif self.kind == "q4_0":
-            tail = dequantize_q4_0(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q4_0 cache")
+            tail = dequantize_q4_0(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)
         elif self.kind == "nf4":
-            tail = dequantize_nf4(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for nf4 cache")
+            tail = dequantize_nf4(self.q[:, start:end], self.s[:, start:end], self.spec).to(torch.float16)
         else:
             raise ValueError(self.kind)
 
@@ -379,11 +415,18 @@ class SeqCacheTensor:
         if end > self.pos:
             raise ValueError(f"Requested end {end} > cached length {self.pos}")
         if start == end:
-            B = (self.buf.size(0) if self.buf is not None else self.q.size(0))  # type: ignore[union-attr]
-            return torch.empty((B, 0, self.spec.dim), device=self.device, dtype=dtype)
+            if self.buf is not None:
+                bsz = int(self.buf.size(0))
+            elif self.q is not None:
+                bsz = int(self.q.size(0))
+            else:
+                raise RuntimeError("Cache storage is not initialized")
+            return torch.empty((bsz, 0, self.spec.dim), device=self.device, dtype=dtype)
 
         if self.kind in ("fp16", "fp32"):
-            return self.buf[:, start:end].to(dtype)  # type: ignore[index]
+            if self.buf is None:
+                raise RuntimeError("Expected fp buffer for fp16/fp32 cache")
+            return self.buf[:, start:end].to(dtype)
 
         r_start = self._residual_start()
         if self._residual is not None and start >= r_start:
@@ -395,22 +438,31 @@ class SeqCacheTensor:
             return torch.cat([a, b], dim=1)
 
         if self.kind == "q8_0":
-            x = dequantize_q8_0(self.q[:, start:end], self.s[:, start:end], self.spec)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q8_0 cache")
+            x = dequantize_q8_0(self.q[:, start:end], self.s[:, start:end], self.spec)
             return x.to(dtype)
         if self.kind == "q4_0":
-            x = dequantize_q4_0(self.q[:, start:end], self.s[:, start:end], self.spec)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for q4_0 cache")
+            x = dequantize_q4_0(self.q[:, start:end], self.s[:, start:end], self.spec)
             return x.to(dtype)
         if self.kind == "nf4":
-            x = dequantize_nf4(self.q[:, start:end], self.s[:, start:end], self.spec)  # type: ignore[index]
+            if self.q is None or self.s is None:
+                raise RuntimeError("Expected quant buffers for nf4 cache")
+            x = dequantize_nf4(self.q[:, start:end], self.s[:, start:end], self.spec)
             return x.to(dtype)
         raise ValueError(self.kind)
 
-    def get(self, length: Optional[int] = None, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    def get(self, length: int | None = None, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         L = self.pos if length is None else int(length)
         return self.get_slice(0, L, dtype=dtype)
 
 
 class LayerKVCache:
+    k: SeqCacheTensor
+    v: SeqCacheTensor
+
     def __init__(
         self,
         *,
@@ -436,7 +488,7 @@ class LayerKVCache:
             raise RuntimeError("K/V cache desync")
         return old
 
-    def get(self, *, dtype: torch.dtype = torch.float32) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get(self, *, dtype: torch.dtype = torch.float32) -> tuple[torch.Tensor, torch.Tensor]:
         return self.k.get(dtype=dtype), self.v.get(dtype=dtype)
 
     def truncate(self, new_pos: int) -> None:
@@ -447,6 +499,10 @@ class LayerKVCache:
 
 
 class DecoupledLayerKVCache:
+    k_sem: SeqCacheTensor
+    k_geo: SeqCacheTensor
+    v: SeqCacheTensor
+
     def __init__(
         self,
         *,
@@ -476,7 +532,7 @@ class DecoupledLayerKVCache:
             raise RuntimeError("Decoupled cache desync")
         return old
 
-    def get(self, *, dtype: torch.dtype = torch.float32) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get(self, *, dtype: torch.dtype = torch.float32) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.k_sem.get(dtype=dtype), self.k_geo.get(dtype=dtype), self.v.get(dtype=dtype)
 
     def truncate(self, new_pos: int) -> None:

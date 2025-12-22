@@ -25,9 +25,10 @@ def neighbors(cfg: KVSelfOptConfig, p: KVCachePolicy) -> list[KVCachePolicy]:
         return out
 
     def neigh_kind(cur: KVCacheKind, cands: tuple[KVCacheKind, ...]) -> list[KVCacheKind]:
-        c = list(cands)
+        c: list[KVCacheKind] = list(cands)
         if cur not in c:
-            c = list(dict.fromkeys([cur] + c))
+            # Keep typing precise (Literal unions) without involving dict-fromkeys inference.
+            c.insert(0, cur)
         i = c.index(cur)
         out: list[KVCacheKind] = []
         if i - 1 >= 0:
@@ -38,6 +39,10 @@ def neighbors(cfg: KVSelfOptConfig, p: KVCachePolicy) -> list[KVCachePolicy]:
 
     out: list[KVCachePolicy] = []
 
+    # Hypothesis test (important for paper + critique):
+    # - Geo path carries RoPE’d positional signal → may be more quantization-sensitive → defaults to higher precision.
+    # - We *always* include the k_sem/k_geo swap mutation (when meaningful) so the tuner is forced to challenge that
+    #   assumption at least once per local search region.
     if p.k_sem_kind != p.k_geo_kind:
         out.append(
             KVCachePolicy(

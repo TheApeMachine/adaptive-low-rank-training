@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
 from pathlib import Path
 
-import numpy as np
+from production.selfopt_cache import as_object_list
+
+
+
+def _require_numpy() -> object:
+    if importlib.util.find_spec("numpy") is None:
+        raise ImportError("numpy is required to load .npy token specs")
+    return importlib.import_module("numpy")
+
+
+def _np_attr(np_mod: object, name: str) -> object:
+    return getattr(np_mod, name, None)
+
+
+def _np_call(np_mod: object, name: str, *args: object, **kwargs: object) -> object:
+    fn = _np_attr(np_mod, name)
+    if not callable(fn):
+        raise AttributeError(f"numpy.{name} is not callable")
+    return fn(*args, **kwargs)
 
 
 def load_token_ids_spec(spec: str) -> list[int]:
@@ -18,13 +38,39 @@ def load_token_ids_spec(spec: str) -> list[int]:
     p = Path(s)
     if os.path.exists(s):
         if p.suffix == ".npy":
-            arr = np.load(str(p), mmap_mode="r")
-            arr = np.asarray(arr).reshape(-1)
-            if arr.dtype != np.int64:
-                arr = arr.astype(np.int64, copy=False)
-            return [int(x) for x in arr.tolist()]
+            np_mod = _require_numpy()
+            arr = _np_call(np_mod, "load", str(p), mmap_mode="r")
+            asarray = _np_attr(np_mod, "asarray")
+            if not callable(asarray):
+                raise AttributeError("numpy.asarray is required")
+            arr2 = asarray(arr)
+            reshape = getattr(arr2, "reshape", None)
+            if callable(reshape):
+                arr2 = reshape(-1)
+            int64_t = _np_attr(np_mod, "int64")
+            dtype = getattr(arr2, "dtype", None)
+            if dtype is not None and int64_t is not None and dtype != int64_t:
+                astype = getattr(arr2, "astype", None)
+                if callable(astype):
+                    arr2 = astype(int64_t, copy=False)
+            tolist = getattr(arr2, "tolist", None)
+            if callable(tolist):
+                lst = tolist()
+                lst2 = as_object_list(lst)
+                if lst2 is not None:
+                    def _as_int(o: object) -> int:
+                        if isinstance(o, bool):
+                            return int(o)
+                        if isinstance(o, int):
+                            return int(o)
+                        if isinstance(o, float):
+                            return int(o)
+                        if isinstance(o, str):
+                            return int(o.strip())
+                        raise TypeError("token id must be int-like")
+
+                    return [_as_int(x) for x in lst2]
+            raise TypeError("Unable to convert .npy token spec to list[int]")
         raw = p.read_text(encoding="utf-8", errors="ignore")
         return [int(t) for t in raw.strip().split() if t.strip()]
     return [int(t) for t in s.strip().split() if t.strip()]
-
-

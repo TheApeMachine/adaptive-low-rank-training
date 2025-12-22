@@ -160,7 +160,7 @@ This project now defaults to a **minimal, self-optimizing CLI**: you specify *in
 ### Train (example)
 
 ```bash
-python3 main.py --mode train --size medium --exp paper_decoupled --data fineweb_100m.npy --wandb
+python3 main.py --mode train --size medium --exp paper_decoupled --data fineweb_100m.npy
 ```
 
 ### Sample (example)

@@ -44,8 +44,41 @@ class Metrics:
         return k, torch.multinomial(p_final, 1)
 
     @staticmethod
-    def compare(lb: torch.Tensor, lt: torch.Tensor, tgt: torch.Tensor) -> dict[str, float]:
-        """Compare base vs test logits for quality gating."""
-        lb, lt = lb[:, -1, :].float(), lt[:, -1, :].float()
-        dnll = (F.cross_entropy(lt, tgt) - F.cross_entropy(lb, tgt)).item()
-        return {"max_abs_logit": (lt - lb).abs().max().item(), "delta_nll": dnll}
+    def compare(
+        lb: torch.Tensor,
+        lt: torch.Tensor,
+        tgt: torch.Tensor,
+        *,
+        compute_kl: bool = False,
+    ) -> dict[str, float]:
+        """Compare base vs test logits for quality gating.
+
+        Returns:
+        - max_abs_logit: max |Δlogit| over vocab (last position)
+        - delta_nll: CE(test) - CE(base) in nats/token (last position)
+        - ppl_ratio: exp(delta_nll) (equivalently PPL(test)/PPL(base))
+        - kl_base_cand: KL(p_base || p_test) in nats/token (optional; expensive)
+        """
+        lb2 = lb[:, -1, :].float()
+        lt2 = lt[:, -1, :].float()
+
+        ce_base = F.cross_entropy(lb2, tgt).detach()
+        ce_test = F.cross_entropy(lt2, tgt).detach()
+        dnll_t = ce_test - ce_base
+        dnll = float(dnll_t.item())
+
+        out: dict[str, float] = {
+            "max_abs_logit": float((lt2 - lb2).abs().max().item()),
+            "delta_nll": dnll,
+            "ppl_ratio": float(torch.exp(dnll_t).item()),
+        }
+
+        if compute_kl:
+            # KL(p_base || p_test) = E_{p_base}[log p_base - log p_test]
+            logp_base = F.log_softmax(lb2, dim=-1)
+            logp_test = F.log_softmax(lt2, dim=-1)
+            p_base = torch.exp(logp_base)
+            kl = (p_base * (logp_base - logp_test)).sum(dim=-1).mean()
+            out["kl_base_cand"] = float(kl.item())
+
+        return out

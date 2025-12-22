@@ -7,12 +7,17 @@ Why this exists:
 
 from __future__ import annotations
 
-import torch
+from typing import TYPE_CHECKING
 
-def pick_device(explicit: str | None = None) -> torch.device:
+if TYPE_CHECKING:  # pragma: no cover
+    import torch
+
+def pick_device(explicit: str | None = None) -> "torch.device":
     """
     pick_device chooses the best available accelerator unless the user overrides it.
     """
+    # Local import: allows importing config/CLI without torch installed (parse-only, docs, etc).
+    import torch
 
     if explicit:
         return torch.device(explicit)

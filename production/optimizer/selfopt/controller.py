@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict
 from collections.abc import Callable
+from typing import Protocol
 
 import torch
 
@@ -15,6 +16,11 @@ from production.train_tuning import tune_batch_by_seq, tune_torch_compile
 
 from production.optimizer.selfopt.capabilities import choose_amp, choose_param_dtype
 from production.optimizer.selfopt.types import RuntimePlan
+
+
+class _TrainTuningCfg(Protocol):
+    vocab_size: int
+    block_size: int
 
 
 class SelfOptController:
@@ -30,13 +36,13 @@ class SelfOptController:
         cache_path: str | None,
         log_path: str | None,
         device: torch.device,
-        cfg: object,
+        cfg: _TrainTuningCfg,
         logger: SelfOptLogger | None = None,
     ) -> None:
         self.cache_path: str | None = str(cache_path) if cache_path else None
         self.log_path: str | None = str(log_path) if log_path else None
         self.device: torch.device = device
-        self.cfg: object = cfg
+        self.cfg: _TrainTuningCfg = cfg
         self.logger: SelfOptLogger | None = logger
 
     def _log(self, ev: dict[str, object]) -> None:

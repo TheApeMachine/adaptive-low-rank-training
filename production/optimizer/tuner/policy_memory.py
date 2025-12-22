@@ -7,6 +7,17 @@ from production.optimizer.tuner.cache_policy import KVCachePolicy
 from production.optimizer.tuner.config import KVSelfOptConfig
 
 
+def _get_int_attr(o: object, name: str, default: int) -> int:
+    v = getattr(o, name, None)
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, int):
+        return int(v)
+    if isinstance(v, float):
+        return int(v)
+    return int(default)
+
+
 def policy_mem_bytes(
     *,
     model_cfg: object,
@@ -16,12 +27,12 @@ def policy_mem_bytes(
 ) -> int:
     """Estimate bytes for a decoupled KV cache under `policy`."""
     return estimate_decoupled_kvcache_bytes(
-        n_layer=int(getattr(model_cfg, "n_layer")),
+        n_layer=_get_int_attr(model_cfg, "n_layer", 0),
         batch_size=int(batch_size),
         max_seq_len=int(max_seq_len),
-        sem_dim=int(getattr(model_cfg, "sem_dim")),
-        geo_dim=int(getattr(model_cfg, "geo_dim")),
-        v_dim=int(getattr(model_cfg, "attn_dim")),
+        sem_dim=_get_int_attr(model_cfg, "sem_dim", 0),
+        geo_dim=_get_int_attr(model_cfg, "geo_dim", 0),
+        v_dim=_get_int_attr(model_cfg, "attn_dim", 0),
         policy=policy,
     )
 

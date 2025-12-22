@@ -34,6 +34,17 @@ if TYPE_CHECKING:
     from production.model.config import ModelConfig
 
 
+def _normalize_attn_mode(mode: object) -> str:
+    """Normalize mode inputs to canonical strings ("standard","gqa","bottleneck","decoupled")."""
+    v = getattr(mode, "value", mode)
+    s = str(v or "").strip().lower()
+    if s in ("baseline", "standard", "base"):
+        return "standard"
+    if s in ("gqa", "bottleneck", "decoupled"):
+        return s
+    return "bottleneck"
+
+
 class _Kernel(Protocol):
     """Minimal Triton kernel interface (`kernel[grid](...)`)."""
 
@@ -122,9 +133,9 @@ class DecoupledBottleneckAttention(nn.Module):
                 raise ValueError(f"{name} ({total}) must be divisible by {denom}")
             return total // denom
 
-        mode = cfg.attn_mode.value
+        mode = _normalize_attn_mode(cfg.attn_mode)
         match mode:
-            case "baseline":
+            case "standard":
                 qk_dim = cfg.d_model
                 v_dim = cfg.d_model
                 self.qk_head_dim = must_div("d_model", qk_dim, n_head)
@@ -186,7 +197,7 @@ class DecoupledBottleneckAttention(nn.Module):
 
                 if cfg.tie_qk:
                     raise ValueError(
-                        "tie_qk is not supported for gqa unless kv_head == n_head (use --attn-mode standard)."
+                        "tie_qk is not supported for gqa unless kv_head == n_head (use attn_mode=standard)."
                     )
 
                 self.q_proj = nn.Linear(cfg.d_model, cfg.attn_dim, bias=False)
@@ -230,7 +241,9 @@ class DecoupledBottleneckAttention(nn.Module):
                 if cfg.decoupled_gate:
                     self.decoupled_gate_logit = nn.Parameter(torch.zeros(n_head))
 
-            # mode is a closed Enum; no default case.
+            case _:
+                # `_normalize_attn_mode` returns a string; keep match exhaustive and fail loud.
+                raise ValueError(f"Unknown attn_mode={mode!r}")
 
         self.logit_scale = nn.Parameter(torch.zeros(n_head)) if cfg.learned_temp else None
         self._flash2_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
@@ -780,9 +793,9 @@ class DecoupledBottleneckAttention(nn.Module):
         B, T, _ = x.shape
         ninfty = neg_inf(x.dtype)
 
-        mode = cfg.attn_mode.value
+        mode = _normalize_attn_mode(cfg.attn_mode)
 
-        if mode in ("baseline", "bottleneck"):
+        if mode in ("standard", "bottleneck"):
             # If tie_qk is enabled, q_proj == k_proj and the projections are identical for self-attention.
             # Compute once and reuse (saves a full matmul + reshape + rotary per layer).
             q_proj = self.q_proj

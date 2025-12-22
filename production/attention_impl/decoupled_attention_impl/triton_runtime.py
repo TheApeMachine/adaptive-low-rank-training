@@ -13,20 +13,17 @@ from typing import TYPE_CHECKING
 __all__ = ["TRITON_AVAILABLE", "triton_decoupled_q4q8q4_available"]
 
 
-def _spec_exists(name: str) -> bool:
-    """Why: detect optional dependencies without importing them."""
-    try:
-        return importlib.util.find_spec(str(name)) is not None
-    except (ImportError, ValueError, AttributeError):
-        return False
-
-
 # At type-check time we force this off so Triton-only code can live behind runtime guards.
-TRITON_AVAILABLE: bool = False if TYPE_CHECKING else bool(_spec_exists("triton") and _spec_exists("triton.language"))
+try:
+    _triton_spec = importlib.util.find_spec("triton") is not None
+    _triton_lang_spec = importlib.util.find_spec("triton.language") is not None
+except (ImportError, ValueError, AttributeError):
+    _triton_spec = False
+    _triton_lang_spec = False
+
+TRITON_AVAILABLE: bool = False if TYPE_CHECKING else bool(_triton_spec and _triton_lang_spec)
 
 
 def triton_decoupled_q4q8q4_available() -> bool:
     """Why: central predicate for whether fused decoupled q4/q8/q4 decode kernels can be used."""
     return bool(TRITON_AVAILABLE)
-
-

@@ -29,6 +29,21 @@ class BaseDefaults:
         if not hasattr(args, "tb"):
             o.set("tb", False)
 
+        # W&B defaults (paper-friendly, still overrideable via argv if present).
+        # Keep CLI minimal; these are internal defaults consumed by RunLogger/WandBWriter.
+        if not hasattr(args, "wandb_project"):
+            o.set("wandb_project", "production")
+        if not hasattr(args, "wandb_entity"):
+            o.set("wandb_entity", "p4n0p71c0n")
+        if not hasattr(args, "wandb_mode"):
+            o.set("wandb_mode", "auto")
+        if not hasattr(args, "wandb_name"):
+            o.set("wandb_name", None)
+        if not hasattr(args, "wandb_group"):
+            o.set("wandb_group", None)
+        if not hasattr(args, "wandb_tags"):
+            o.set("wandb_tags", None)
+
         # Runtime KV cache defaults (keeps runners stable).
         for name, val in [
             ("kv_cache", "fp16"),

@@ -8,17 +8,23 @@ from __future__ import annotations
 from production.attention_impl.decoupled_attention import (
     DecoupledBottleneckAttention,
     TRITON_AVAILABLE,
-    _decoupled_qk_cat,
-    _decoupled_scores_f32,
-    _triton_decoupled_q4q8q4_available,
+    decoupled_qk_cat,
+    decoupled_scores_f32,
+    triton_decoupled_q4q8q4_available,
     neg_inf,
 )
+
+# Back-compat aliases (older tests/bench harnesses expect underscore-prefixed helpers).
+_decoupled_qk_cat = decoupled_qk_cat
+_decoupled_scores_f32 = decoupled_scores_f32
 
 __all__ = [
     "TRITON_AVAILABLE",
     "DecoupledBottleneckAttention",
+    "decoupled_qk_cat",
+    "decoupled_scores_f32",
     "_decoupled_qk_cat",
     "_decoupled_scores_f32",
-    "_triton_decoupled_q4q8q4_available",
+    "triton_decoupled_q4q8q4_available",
     "neg_inf",
 ]

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+Ablate `null_attn` for decoupled checkpoints by measuring teacher-forced NLL.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -7,7 +11,6 @@ import math
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -24,7 +27,9 @@ if __package__ in (None, ""):
 from production.config import pick_device  # pylint: disable=wrong-import-position
 from production.model import GPT, ModelConfig  # pylint: disable=wrong-import-position
 from production.kvcache_backend import KVCacheTensorConfig  # pylint: disable=wrong-import-position
+from production.model.cache import Cache  # pylint: disable=wrong-import-position
 from production.runtime_tuning import load_token_ids_spec  # pylint: disable=wrong-import-position
+from production.selfopt_cache import as_str_object_dict  # pylint: disable=wrong-import-position
 
 
 def _load_tokens_auto(spec: str, *, want_len: int) -> list[int]:
@@ -43,10 +48,8 @@ def _load_tokens_auto(spec: str, *, want_len: int) -> list[int]:
 
     p = Path(str(spec))
     if not p.exists():
-        raise ValueError(
-            f"--tokens must be a path to token IDs (.txt/.npy) or raw text file; "
-            f"not found: {spec}"
-        )
+        msg = f"--tokens must be a path to token IDs (.txt/.npy) or raw text file; not found: {spec}"
+        raise ValueError(msg)
 
     raw = p.read_text(encoding="utf-8", errors="ignore")
     enc = tiktoken.get_encoding("gpt2")
@@ -58,7 +61,6 @@ def _load_tokens_auto(spec: str, *, want_len: int) -> list[int]:
     return [int(x) for x in ids]
 
 
-@torch.no_grad()
 def eval_nll_chunked(
     model: GPT,
     tokens_1d: torch.Tensor,
@@ -74,52 +76,69 @@ def eval_nll_chunked(
     if total_len < 2:
         return float("nan")
 
-    ids = (
-        tokens_1d[: total_len + 1]
-        .to(device=device, dtype=torch.long)
-        .unsqueeze(0)
-    )  # (1, total_len+1)
-    # predict next token for each position 0..total_len-1 (target is 1..total_len)
-    inp = ids[:, :total_len]
-    tgt = ids[:, 1 : total_len + 1]
+    with torch.no_grad():
+        ids = tokens_1d[: total_len + 1].to(device=device, dtype=torch.long).unsqueeze(0)  # (1, total_len+1)
+        # predict next token for each position 0..total_len-1 (target is 1..total_len)
+        inp = ids[:, :total_len]
+        tgt = ids[:, 1 : total_len + 1]
 
-    # fp16 caches everywhere for evaluation (we're isolating the null_attn effect).
-    fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
-    caches: list[Any] = []
-    for _ in range(int(model.cfg.n_layer)):
-        caches.append(
-            model.make_decoupled_layer_cache(
-                batch_size=1,
-                max_seq_len=total_len,
-                k_sem_cfg=fp16,
-                k_geo_cfg=fp16,
-                v_cfg=fp16,
-                device=device,
-                decode_block=1024,
-                fused="none",
-            )
-        )
+        # fp16 caches everywhere for evaluation (we're isolating the null_attn effect).
+        fp16 = KVCacheTensorConfig(kind="fp16", qblock=32, residual_len=0)
+        caches = Cache.build(model.cfg, batch_size=1, max_seq=total_len, device=device, k_sem=fp16, k_geo=fp16, v=fp16)
+        # Runtime hints (set dynamically to avoid tight coupling to cache impl types).
+        for c in caches:
+            setattr(c, "decode_block", 1024)
+            setattr(c, "fused", "none")
 
-    nll_sum = 0.0
-    nll_count = 0
-    for i in range(0, total_len, int(chunk_size)):
-        end = min(total_len, i + int(chunk_size))
-        x = inp[:, i:end]
-        y = tgt[:, i:end]
-        logits, caches = model(x, caches=caches, pos_offset=int(i))
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), y.reshape(-1), reduction="sum")
-        nll_sum += float(loss.item())
-        nll_count += int(y.numel())
+        nll_sum = 0.0
+        nll_count = 0
+        for i in range(0, total_len, int(chunk_size)):
+            end = min(total_len, i + int(chunk_size))
+            x = inp[:, i:end]
+            y = tgt[:, i:end]
+            logits, caches_out = model.forward(x, caches=caches, pos_offset=int(i))
+            if caches_out is None:
+                raise RuntimeError("Expected caches to be returned when caches are provided.")
+            caches = caches_out
+            loss = F.cross_entropy(logits.reshape(-1, int(logits.size(-1))), y.reshape(-1), reduction="sum")
+            nll_sum += float(loss.item())
+            nll_count += int(y.numel())
 
-    return float(nll_sum / max(1, nll_count))
+        return float(nll_sum / max(1, nll_count))
+
+
+def _torch_load_obj(path: Path, *, map_location: torch.device) -> object:
+    fn = getattr(torch, "load", None)
+    if not callable(fn):
+        raise AttributeError("torch.load is required to load checkpoints.")
+    return fn(str(path), map_location=map_location)
+
+
+def _as_state_dict(obj: object) -> dict[str, torch.Tensor]:
+    d = as_str_object_dict(obj)
+    if d is None:
+        raise TypeError("state_dict must be a dict")
+    out: dict[str, torch.Tensor] = {}
+    for k, v in d.items():
+        if isinstance(v, torch.Tensor):
+            out[k] = v
+    if not out:
+        raise ValueError("state_dict is empty or not a tensor dict")
+    return out
 
 
 def _load_model(*, ckpt_path: str, device: torch.device, null_attn: bool, seq_len: int) -> GPT:
-    ckpt = torch.load(str(ckpt_path), map_location=device)
-    cfg_dict = ckpt.get("config", None)
-    if cfg_dict is None:
+    ckpt_obj = _torch_load_obj(Path(str(ckpt_path)), map_location=device)
+    ckpt = as_str_object_dict(ckpt_obj)
+    if ckpt is None:
+        raise TypeError("Checkpoint must be a mapping")
+
+    cfg_obj = ckpt.get("config", None)
+    cfg_map = as_str_object_dict(cfg_obj)
+    if cfg_map is None:
         raise ValueError("Checkpoint missing 'config'. Can't reconstruct model safely.")
-    cfg = ModelConfig(**cfg_dict)
+
+    cfg = ModelConfig.from_dict(cfg_map, device=device)
     if str(getattr(cfg, "attn_mode", "")) != "decoupled":
         raise ValueError("This ablation script targets decoupled attention checkpoints only.")
 
@@ -127,18 +146,43 @@ def _load_model(*, ckpt_path: str, device: torch.device, null_attn: bool, seq_le
     cfg.block_size = int(max(int(cfg.block_size), int(seq_len)))
 
     model = GPT(cfg).to(device)
-    incompatible = model.load_state_dict(ckpt["model"], strict=False)
-    if incompatible.missing_keys or incompatible.unexpected_keys:
-        print(
+    sd = _as_state_dict(ckpt.get("model", None))
+    incompatible = model.load_state_dict(sd, strict=False)
+    missing = getattr(incompatible, "missing_keys", [])
+    unexpected = getattr(incompatible, "unexpected_keys", [])
+    if isinstance(missing, list) and isinstance(unexpected, list) and (missing or unexpected):
+        msg = (
             f"[ablate] non-strict load (null_attn={null_attn}). "
-            f"Missing={incompatible.missing_keys} "
-            f"Unexpected={incompatible.unexpected_keys}"
+            f"Missing={missing} "
+            f"Unexpected={unexpected}"
         )
-    model.eval()
+        print(msg)
+    _ = model.eval()
     return model
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _as_int(o: object, default: int) -> int:
+    if isinstance(o, bool):
+        return int(o)
+    if isinstance(o, int):
+        return int(o)
+    if isinstance(o, float):
+        return int(o)
+    if isinstance(o, str):
+        try:
+            return int(o.strip())
+        except ValueError:
+            return int(default)
+    return int(default)
+
+
+def _as_str(o: object, default: str) -> str:
+    if o is None:
+        return str(default)
+    return str(o)
+
+
+def main(argv: list[str] | None = None) -> int:
     """
     Ablate null_attn for decoupled checkpoints via teacher-forced NLL on a small token window.
     """
@@ -148,42 +192,50 @@ def main(argv: Optional[list[str]] = None) -> int:
             "on a small token window."
         )
     )
-    ap.add_argument("--ckpt", type=str, required=True)
-    ap.add_argument(
+    _ = ap.add_argument("--ckpt", type=str, required=True)
+    _ = ap.add_argument(
         "--tokens",
         type=str,
         required=True,
         help="Token spec: path to .txt/.npy or whitespace-separated ints."
     )
-    ap.add_argument("--seq-len", type=int, default=2048)
-    ap.add_argument("--chunk-size", type=int, default=256)
-    ap.add_argument("--device", type=str, default=None)
-    args = ap.parse_args(argv)
+    _ = ap.add_argument("--seq-len", type=int, default=2048)
+    _ = ap.add_argument("--chunk-size", type=int, default=256)
+    _ = ap.add_argument("--device", type=str, default=None)
+    args_ns = ap.parse_args(argv)
+    args_map = as_str_object_dict(getattr(args_ns, "__dict__", None)) or {}
 
-    dev = pick_device(args.device) if args.device is None else torch.device(str(args.device))
-    ids = _load_tokens_auto(str(args.tokens), want_len=int(args.seq_len) + 1)
+    ckpt = _as_str(args_map.get("ckpt", ""), "")
+    tok_spec = _as_str(args_map.get("tokens", ""), "")
+    seq_len = _as_int(args_map.get("seq_len", 2048), 2048)
+    chunk_size = _as_int(args_map.get("chunk_size", 256), 256)
+    dev_raw = args_map.get("device", None)
+    dev_str = str(dev_raw) if isinstance(dev_raw, str) else None
+
+    dev = pick_device(None) if dev_str is None else torch.device(str(dev_str))
+    ids = _load_tokens_auto(tok_spec, want_len=int(seq_len) + 1)
     tok = torch.tensor(ids, dtype=torch.long)
 
     m_off = _load_model(
-        ckpt_path=str(args.ckpt), device=dev, null_attn=False, seq_len=int(args.seq_len)
+        ckpt_path=ckpt, device=dev, null_attn=False, seq_len=int(seq_len)
     )
     m_on = _load_model(
-        ckpt_path=str(args.ckpt), device=dev, null_attn=True, seq_len=int(args.seq_len)
+        ckpt_path=ckpt, device=dev, null_attn=True, seq_len=int(seq_len)
     )
 
     nll_off = eval_nll_chunked(
         m_off,
         tok,
-        seq_len=int(args.seq_len),
-        chunk_size=int(args.chunk_size),
-        device=dev
+        seq_len=int(seq_len),
+        chunk_size=int(chunk_size),
+        device=dev,
     )
 
     nll_on = eval_nll_chunked(
         m_on, tok,
-        seq_len=int(args.seq_len),
-        chunk_size=int(args.chunk_size),
-        device=dev
+        seq_len=int(seq_len),
+        chunk_size=int(chunk_size),
+        device=dev,
     )
 
     dnll = float(nll_on - nll_off)
@@ -193,7 +245,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "cfg_off": asdict(m_off.cfg),
         "cfg_on": asdict(m_on.cfg)
     }, indent=2, sort_keys=True))
-    print(f"[ablate] seq_len={int(args.seq_len)} chunk={int(args.chunk_size)} device={dev}")
+    print(f"[ablate] seq_len={int(seq_len)} chunk={int(chunk_size)} device={dev}")
     print(f"[ablate] null_attn=False NLL={nll_off:.6f}")
     print(f"[ablate] null_attn=True  NLL={nll_on:.6f}")
     print(f"[ablate] ΔNLL(on-off)={dnll:.6f} (ppl_ratio={ppl_ratio:.6f})")

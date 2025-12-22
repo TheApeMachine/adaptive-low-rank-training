@@ -12,6 +12,8 @@ import argparse
 import math
 import sys
 
+from production.selfopt_cache import as_str_object_dict
+
 
 # Bottleneck/decoupled KV reduction target (d_model / attn_dim).
 _BOTTLENECK_RATIO: float = 5.3333333333
@@ -41,7 +43,15 @@ EXP_PRESETS: dict[str, dict[str, object]] = {
     # Decoupled flagship path: keep null_attn off by default to avoid extra branching and to preserve
     # fused/streaming decode fast paths. See `production/ablate_null_attn.py` for an explicit ablation.
     "paper_decoupled": dict(attn_mode="decoupled", tie_qk=True, null_attn=False, rope=True),
+    # Paper appendix ablations (no new CLI flags; encoded as presets for the manifest).
+    "paper_decoupled_null": dict(attn_mode="decoupled", tie_qk=True, null_attn=True, rope=True),
+    "paper_decoupled_notieqk": dict(attn_mode="decoupled", tie_qk=False, null_attn=False, rope=True),
+    "paper_decoupled_norope": dict(attn_mode="decoupled", tie_qk=True, null_attn=False, rope=False),
     "paper_gqa": dict(attn_mode="gqa"),
+    # Baseline LR sweep (fairness appendix).
+    "paper_baseline_lr2e4": dict(attn_mode="standard", lr=2e-4),
+    "paper_baseline_lr3e4": dict(attn_mode="standard", lr=3e-4),
+    "paper_baseline_lr4e4": dict(attn_mode="standard", lr=4e-4),
     # Training-oriented preset: expresses intent only; runtime performance is auto-tuned.
     "train_decoupled_fast": dict(attn_mode="decoupled", tie_qk=True, rope=True, null_attn=False),
 }
@@ -57,9 +67,11 @@ def _argv_has_flag(flag: str) -> bool:
 
 def apply_exp_preset(args: argparse.Namespace) -> None:
     """Why: keep experiment configurations consistent across runs/harnesses."""
-    if not getattr(args, "exp", None):
+    a = as_str_object_dict(getattr(args, "__dict__", {})) or {}
+    exp_obj = a.get("exp", None)
+    if not isinstance(exp_obj, str) or not exp_obj:
         return
-    exp = str(args.exp)
+    exp = str(exp_obj)
     if exp not in EXP_PRESETS and exp != "paper_all":
         raise ValueError(f"Unknown experiment preset: {exp}")
 
@@ -69,9 +81,22 @@ def apply_exp_preset(args: argparse.Namespace) -> None:
 
     preset = EXP_PRESETS[exp]
 
+    # Training hyperparameter overrides (used for controlled sweeps in the manifest).
+    if "lr" in preset:
+        try:
+            lr_obj = preset["lr"]
+            lr = float(str(lr_obj))
+            args.lr = float(lr)
+            # Keep min_lr consistent unless explicitly set elsewhere.
+            if not hasattr(args, "min_lr"):
+                args.min_lr = float(lr) * 0.1
+        except (TypeError, ValueError):
+            pass
+
     # attn_mode
     if not _argv_has_flag("--attn-mode") and "attn_mode" in preset:
-        args.attn_mode = preset["attn_mode"]
+        am = preset["attn_mode"]
+        args.attn_mode = str(am)
 
     # Experiment-specific dims (derived from d_model; no size tables).
     d_model = int(getattr(args, "d_model", 0) or 0)

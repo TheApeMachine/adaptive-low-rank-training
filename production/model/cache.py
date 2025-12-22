@@ -6,10 +6,19 @@ from typing import TYPE_CHECKING
 import torch
 
 from production.kvcache_backend import DecoupledLayerKVCache, LayerKVCache, KVCacheTensorConfig
-from .config import Mode
 
 if TYPE_CHECKING:
     from .config import ModelConfig
+
+
+def _normalize_attn_mode(mode: object) -> str:
+    v = getattr(mode, "value", mode)
+    s = str(v or "").strip().lower()
+    if s in ("baseline", "standard", "base"):
+        return "standard"
+    if s in ("gqa", "bottleneck", "decoupled"):
+        return s
+    return "bottleneck"
 
 class Cache:
     """Factory for KV cache construction."""
@@ -36,7 +45,8 @@ class Cache:
         **tensor_cfgs: KVCacheTensorConfig
     ) -> DecoupledLayerKVCache | LayerKVCache:
         """Build a single KV cache layer."""
-        if cfg.attn_mode == Mode.DECOUPLED:
+        mode = _normalize_attn_mode(getattr(cfg, "attn_mode", "bottleneck"))
+        if mode == "decoupled":
             return DecoupledLayerKVCache(
                 batch_size=batch_size, max_seq_len=max_seq,
                 k_sem_dim=cfg.sem_dim, k_geo_dim=cfg.geo_dim, v_dim=cfg.attn_dim,
@@ -48,7 +58,7 @@ class Cache:
 
         # Standard or GQA
         kdim = (
-            cfg.d_model if cfg.attn_mode == Mode.BASELINE
+            cfg.d_model if mode == "standard"
             else int((cfg.kv_head or cfg.n_head) * (cfg.attn_dim // cfg.n_head))
         )
         kv_cfg = tensor_cfgs.get("v", KVCacheTensorConfig(kind="fp16", qblock=32))

@@ -1,12 +1,15 @@
+"""Rotary positional embedding (RoPE) with an amortized-growing cache.
+
+This avoids O(T) cache entries during token-by-token decode by caching per (device, dtype)
+and growing tables geometrically.
+"""
+
 from __future__ import annotations
 
-from typing import Dict, Tuple
-
 import torch
-import torch.nn as nn
 
 
-class RotaryEmbedding(nn.Module):
+class RotaryEmbedding:
     """
     RoPE with cached cos/sin tables.
 
@@ -19,16 +22,19 @@ class RotaryEmbedding(nn.Module):
       so decode stays O(N) memory and ~O(N) total trig work.
     """
 
+    inv_freq: torch.Tensor
+    rot_dim: int
+    _cache: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]]
+
     def __init__(self, rot_dim: int, base: float = 10000.0):
-        super().__init__()
         if rot_dim % 2 != 0:
             raise ValueError(f"rot_dim must be even, got {rot_dim}")
-        self.rot_dim = rot_dim
-        inv_freq = 1.0 / (base ** (torch.arange(0, rot_dim, 2).float() / rot_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.rot_dim = int(rot_dim)
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.rot_dim, 2, dtype=torch.float32) / float(self.rot_dim)))
+        self.inv_freq = inv_freq
 
         # Cache: (device, dtype) -> (cos, sin) with shape (L_cached, rot_dim/2)
-        self._cache: Dict[Tuple[str, str], Tuple[torch.Tensor, torch.Tensor]] = {}
+        self._cache = {}
 
     @staticmethod
     def _next_pow2(n: int) -> int:
@@ -37,40 +43,35 @@ class RotaryEmbedding(nn.Module):
             return 0
         return 1 << (n - 1).bit_length()
 
-    def _cos_sin(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _cos_sin(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         seq_len = int(seq_len)
         key = (str(device), str(dtype))
-        cached = self._cache.get(key, None)
+        cached = self._cache.get(key)
         if cached is None:
             cached_len = 0
-            cos_cached = None
-            sin_cached = None
+            cos_cached = torch.empty((0, self.rot_dim // 2), device=device, dtype=dtype)
+            sin_cached = torch.empty((0, self.rot_dim // 2), device=device, dtype=dtype)
         else:
             cos_cached, sin_cached = cached
             cached_len = int(cos_cached.size(0))
 
-        if cached is None or cached_len < seq_len:
+        if cached_len < seq_len:
             target_len = self._next_pow2(seq_len)
             if target_len < seq_len:
                 target_len = seq_len
 
             start = cached_len
-            t = torch.arange(start, target_len, device=device, dtype=self.inv_freq.dtype)
-            freqs = torch.einsum("i,j->ij", t, self.inv_freq.to(device))
+            t = torch.arange(start, target_len, device=device, dtype=torch.float32)
+            inv = self.inv_freq.to(device=device, dtype=torch.float32)
+            freqs = torch.outer(t, inv)
             cos_new = torch.cos(freqs).to(dtype=dtype)
             sin_new = torch.sin(freqs).to(dtype=dtype)
 
-            if cached is None:
-                cos_all = cos_new
-                sin_all = sin_new
-            else:
-                cos_all = torch.cat([cos_cached, cos_new], dim=0)  # type: ignore[arg-type]
-                sin_all = torch.cat([sin_cached, sin_new], dim=0)  # type: ignore[arg-type]
+            cos_cached = torch.cat([cos_cached, cos_new], dim=0)
+            sin_cached = torch.cat([sin_cached, sin_new], dim=0)
+            self._cache[key] = (cos_cached, sin_cached)
 
-            self._cache[key] = (cos_all, sin_all)
-            cos_cached, sin_cached = cos_all, sin_all
-
-        return cos_cached[:seq_len], sin_cached[:seq_len]
+        return (cos_cached[:seq_len], sin_cached[:seq_len])
 
     def rotate(self, x: torch.Tensor, pos_offset: int) -> torch.Tensor:
         """

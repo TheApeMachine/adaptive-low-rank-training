@@ -21,14 +21,22 @@ def allowed_fused_modes(*, base_fused: str, cache: object) -> list[str]:
     if not triton_decoupled_q4q8q4_available():
         return ["none"]
 
-    ok = True
     try:
+        k_sem = getattr(cache, "k_sem", None)
+        k_geo = getattr(cache, "k_geo", None)
+        v = getattr(cache, "v", None)
+        k_sem_kind = getattr(k_sem, "kind", None)
+        k_geo_kind = getattr(k_geo, "kind", None)
+        v_kind = getattr(v, "kind", None)
         ok = (
-            getattr(getattr(cache, "k_sem"), "kind") == "q4_0"
-            and getattr(getattr(cache, "k_geo"), "kind") == "q8_0"
-            and getattr(getattr(cache, "v"), "kind") == "q4_0"
+            isinstance(k_sem_kind, str)
+            and k_sem_kind == "q4_0"
+            and isinstance(k_geo_kind, str)
+            and k_geo_kind == "q8_0"
+            and isinstance(v_kind, str)
+            and v_kind == "q4_0"
         )
-    except (AttributeError, TypeError):
+    except (AttributeError, TypeError, ValueError):
         ok = False
     if not ok:
         return ["none"]

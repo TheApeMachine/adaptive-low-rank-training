@@ -7,11 +7,27 @@ from collections.abc import Callable
 
 import torch
 
-from production.selfopt_cache import get_cache_entry, set_cache_entry
+from production.selfopt_cache import as_str_object_dict, get_cache_entry, set_cache_entry
 from production.selfopt_utils import device_sig, hash_cfg, restore_rng, snapshot_rng
 
 from production.optimizer.tuner.train.bench import bench_train_tok_s
 from production.optimizer.tuner.train.types import TrainCompilePlan
+
+
+def _compile_module(*, model: torch.nn.Module, mode: str) -> torch.nn.Module:
+    """Best-effort torch.compile that always returns a Module.
+
+    Torch's type stubs model `torch.compile` as returning a callable; at runtime it returns
+    a `torch.nn.Module` for `nn.Module` inputs. We narrow dynamically to keep strict typing.
+    """
+    compile_obj = getattr(torch, "compile", None)
+    if not callable(compile_obj):
+        return model
+    try:
+        compiled_obj: object = compile_obj(model, mode=str(mode))
+    except (RuntimeError, TypeError, ValueError):
+        return model
+    return compiled_obj if isinstance(compiled_obj, torch.nn.Module) else model
 
 
 def tune_torch_compile(
@@ -39,24 +55,29 @@ def tune_torch_compile(
     iters = int(max(1, iters))
     hysteresis = float(max(0.0, hysteresis))
 
+    # Cache schema/version bump (compile + cudagraph behaviors are torch-version dependent).
+    COMPILE_TUNER_VERSION = 1
+
     key = (
-        f"{device_sig(device)}|train_compile|cfg={hash_cfg(cfg)}|"
+        f"{device_sig(device)}|train_compile|v={COMPILE_TUNER_VERSION}|cfg={hash_cfg(cfg)}|"
         f"bs={int(batch_size)}|ga={int(grad_accum)}|seq={int(seq_len)}|"
         f"amp={int(bool(amp_enabled))}|ampdt={str(amp_dtype)}|mode={mode}"
     )
 
     if cache_path:
         cached = get_cache_entry(cache_path, section="train_compile", key=key)
-        if isinstance(cached, dict) and "enabled" in cached:
+        cached_map = as_str_object_dict(cached)
+        if cached_map is not None and "enabled" in cached_map:
             try:
-                want = bool(cached.get("enabled", False))
+                enabled_obj = cached_map["enabled"]
+                want = bool(enabled_obj) if isinstance(enabled_obj, bool | int) else False
                 plan = TrainCompilePlan(
                     enabled=want, mode=mode, warmup=warmup, iters=iters, hysteresis=hysteresis
                 )
                 if want and enabled_default:
                     try:
-                        return torch.compile(model, mode=mode), plan
-                    except Exception:
+                        return _compile_module(model=model, mode=mode), plan
+                    except (RuntimeError, TypeError, ValueError):
                         return model, TrainCompilePlan(
                             enabled=False,
                             mode=mode,
@@ -65,7 +86,7 @@ def tune_torch_compile(
                             hysteresis=hysteresis,
                         )
                 return model, plan
-            except Exception:
+            except (TypeError, ValueError, KeyError):
                 pass
 
     if not enabled_default:
@@ -91,8 +112,8 @@ def tune_torch_compile(
             print(f"[selfopt][train] compile probe baseline tok/s={tok_s_base:.0f}")
 
         try:
-            compiled = torch.compile(model, mode=mode)
-        except Exception as e:
+            compiled = _compile_module(model=model, mode=mode)
+        except (RuntimeError, TypeError, ValueError) as e:
             if verbose:
                 print(f"[selfopt][train] torch.compile failed; continuing without it: {e}")
             plan = TrainCompilePlan(
@@ -106,22 +127,30 @@ def tune_torch_compile(
                         key=key,
                         value={"enabled": False, "ts": float(time.time())},
                     )
-                except Exception:
+                except (OSError, TypeError, ValueError):
                     pass
             return model, plan
 
-        tok_s_comp = bench_train_tok_s(
-            device=device,
-            model=compiled,
-            get_batch=get_batch,
-            batch_size=batch_size,
-            grad_accum=grad_accum,
-            seq_len=seq_len,
-            warmup=warmup,
-            iters=iters,
-            amp_enabled=amp_enabled,
-            amp_dtype=amp_dtype,
-        )
+        try:
+            tok_s_comp = bench_train_tok_s(
+                device=device,
+                model=compiled,
+                get_batch=get_batch,
+                batch_size=batch_size,
+                grad_accum=grad_accum,
+                seq_len=seq_len,
+                warmup=warmup,
+                iters=iters,
+                amp_enabled=amp_enabled,
+                amp_dtype=amp_dtype,
+            )
+        except RuntimeError as e:
+            # CUDA graphs overwrite error (known interaction on some torch versions).
+            msg = str(e)
+            if "CUDAGraphs" in msg and "overwritten" in msg:
+                tok_s_comp = -1.0
+            else:
+                raise
         if verbose:
             print(f"[selfopt][train] compile probe compiled tok/s={tok_s_comp:.0f}")
 
@@ -142,7 +171,7 @@ def tune_torch_compile(
                         "ts": float(time.time()),
                     },
                 )
-            except Exception:
+            except (OSError, TypeError, ValueError):
                 pass
         return (compiled if want else model), plan
     finally:

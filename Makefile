@@ -1,7 +1,8 @@
 .PHONY: train paper_all paper_data paper_experiments paper_analyze paper_baseline paper_bottleneck paper_decoupled paper_gqa paper_deep paper_smoke print_config install_deps test test_verbose
 
 # Default python used by utility targets (tests, analysis helpers, etc.)
-PY ?= python3.12
+# Override if you want a specific interpreter, e.g. `make test PY=python3.12`.
+PY ?= python
 
 train:
 	# python3 v1_gradient_grouping.py --mode baseline 

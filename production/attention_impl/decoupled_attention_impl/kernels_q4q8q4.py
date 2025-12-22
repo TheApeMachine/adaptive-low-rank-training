@@ -26,8 +26,8 @@ kv_decode_reduce_partitions: object | None = None
 
 
 # Why: Hide Triton code from type checker (TYPE_CHECKING=True) but load at runtime when available.
-if not TYPE_CHECKING and TRITON_AVAILABLE:  # type: ignore[unreachable]
-    try:
+if not TYPE_CHECKING and TRITON_AVAILABLE:
+    try:  # pyright: ignore[reportUnreachable]
         import triton
         import triton.language as tl
     except (ImportError, ModuleNotFoundError):
@@ -189,7 +189,7 @@ if not TYPE_CHECKING and TRITON_AVAILABLE:  # type: ignore[unreachable]
             d_part_ptr,
             o_part_ptr,
             L_prefix: tl.int32,
-            P: tl.int32,
+            _P: tl.int32,
             PARTITION_SIZE: tl.constexpr,
             H: tl.constexpr,
             HD_SEM: tl.constexpr,

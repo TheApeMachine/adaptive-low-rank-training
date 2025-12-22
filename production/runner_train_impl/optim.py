@@ -1,8 +1,8 @@
-"""Optimizer construction for training.
+"""
+Optimizer construction for training.
 
-Why this exists:
-- The runner supports a small set of optimizers (AdamW, Lion) without external deps.
-- Parsing and optimizer wiring lives here to keep the training loop readable.
+The runner supports a small set of optimizers (AdamW, Lion) without external deps.
+Parsing and optimizer wiring lives here to keep the training loop readable.
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ import torch
 
 
 def _parse_two_floats(s: str, default: tuple[float, float]) -> tuple[float, float]:
-    """Why: CLI strings need robust parsing, but the loop should not care."""
+    """
+    CLI strings need robust parsing, but the loop should not care.
+    """
     try:
         a, b = str(s).split(",")
         return float(a), float(b)
@@ -37,7 +39,9 @@ def _adamw(
     foreach: bool | None = None,
     fused: bool | None = None,
 ) -> torch.optim.Optimizer:
-    """Why: tolerate torch version differences (foreach/fused) without ignore comments."""
+    """
+    tolerate torch version differences (foreach/fused) without ignore comments.
+    """
     ctor = cast(_AdamWCallable, cast(object, torch.optim.AdamW))
 
     kw: dict[str, object] = {
@@ -70,12 +74,14 @@ def build_optimizer(
     foreach: bool,
     fused: bool,
 ) -> torch.optim.Optimizer:
-    """Why: a single place that maps config knobs to a concrete optimizer instance."""
+    """
+    a single place that maps config knobs to a concrete optimizer instance.
+    """
     _ = lion_betas
     opt_name = str(name or "adamw").strip().lower()
 
     if opt_name == "lion":
-        # Why: keep the runner functional even when Lion isn't available/typed; AdamW is the default.
+        # keep the runner functional even when Lion isn't available/typed; AdamW is the default.
         opt_name = "adamw"
 
     # Default: AdamW.

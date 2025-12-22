@@ -44,10 +44,19 @@ def _infer_selfopt_cache_path(args: argparse.Namespace) -> str | None:
         return None
 
 
-def _default_selfopt_cfg(args: argparse.Namespace) -> KVSelfOptConfig:
+def _default_selfopt_cfg(args: argparse.Namespace, device: torch.device) -> KVSelfOptConfig:
     # Self-optimization is always enabled and non-configurable: the system chooses the policy.
     # NOTE: We still persist/cache tuned plans for reuse, but callers cannot override tuning knobs.
-    return KVSelfOptConfig(mode="online", scope="all", cache_path=_infer_selfopt_cache_path(args))
+    # Critique-driven default: enable cache-policy quality gates so we never accept a policy purely
+    # on speed/memory without a fidelity check. Long-horizon gate is enabled on CUDA by default.
+    return KVSelfOptConfig(
+        mode="online",
+        scope="all",
+        cache_path=_infer_selfopt_cache_path(args),
+        policy_quality=True,
+        policy_quality_long=(str(getattr(device, "type", "cpu")) == "cuda"),
+        policy_quality_needle=(str(getattr(device, "type", "cpu")) == "cuda"),
+    )
 
 
 def run_single(args: argparse.Namespace, device: torch.device) -> None:
@@ -57,7 +66,7 @@ def run_single(args: argparse.Namespace, device: torch.device) -> None:
     This file intentionally stays small; heavy logic lives in mode-specific modules.
     """
     _configure_stdio_line_buffering()
-    self_opt_cfg = _default_selfopt_cfg(args)
+    self_opt_cfg = _default_selfopt_cfg(args, device)
 
     mode = str(getattr(args, "mode", "train"))
     if mode == "sample":

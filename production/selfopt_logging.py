@@ -1,24 +1,34 @@
+"""Best-effort structured logging for self-optimization + training runtime."""
+
 from __future__ import annotations
 
 import json
 import os
 import time
-from typing import Any, Dict, Optional
 
 
-def append_jsonl(path: Optional[str], record: Dict[str, Any]) -> None:
+def append_jsonl(path: str | None, record: dict[str, object]) -> None:
     """Append a single JSON record to a .jsonl file (best-effort)."""
     if not path:
         return
     try:
         rec = dict(record)
-        rec.setdefault("ts", float(time.time()))
+        _ = rec.setdefault("ts", float(time.time()))
         os.makedirs(os.path.dirname(str(path)) or ".", exist_ok=True)
         with open(str(path), "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, sort_keys=True, default=str) + "\n")
-    except Exception:
+            _ = f.write(json.dumps(rec, sort_keys=True, default=str) + "\n")
+    except (OSError, TypeError, ValueError):
         # Logging must never break training.
         return
+
+
+def _call_best_effort(fn: object, *args: object, **kwargs: object) -> object | None:
+    if not callable(fn):
+        return None
+    try:
+        return fn(*args, **kwargs)
+    except (OSError, TypeError, ValueError, AttributeError, RuntimeError):
+        return None
 
 
 class SelfOptLogger:
@@ -34,22 +44,23 @@ class SelfOptLogger:
     def __init__(
         self,
         *,
-        jsonl_path: Optional[str] = None,
-        run_logger: Optional[Any] = None,
+        jsonl_path: str | None = None,
+        run_logger: object | None = None,
         echo: bool = True,
     ) -> None:
-        self.jsonl_path = str(jsonl_path) if jsonl_path else None
-        self.run_logger = run_logger
-        self.echo = bool(echo)
+        self.jsonl_path: str | None = str(jsonl_path) if jsonl_path else None
+        self.run_logger: object | None = run_logger
+        self.echo: bool = bool(echo)
 
-    def log(self, event: Dict[str, Any], *, msg: Optional[str] = None, echo: Optional[bool] = None) -> None:
+    def log(self, event: dict[str, object], *, msg: str | None = None, echo: bool | None = None) -> None:
         """Log an event, optionally echoing a human-readable message."""
         try:
             # Always forward structured events first (so a failing print doesn't drop metrics).
             if self.run_logger is not None:
                 try:
-                    self.run_logger.log(event)
-                except Exception:
+                    log_fn = getattr(self.run_logger, "log", None)
+                    _ = _call_best_effort(log_fn, event)
+                except (OSError, TypeError, ValueError, AttributeError, RuntimeError):
                     pass
             append_jsonl(self.jsonl_path, event)
         finally:
@@ -57,23 +68,25 @@ class SelfOptLogger:
             if do_echo and msg:
                 try:
                     print(str(msg), flush=True)
-                except Exception:
+                except (OSError, TypeError, ValueError):
                     pass
 
-    def finalize(self, **kwargs: Any) -> None:
+    def finalize(self, *args: object, **kwargs: object) -> None:
         if self.run_logger is None:
             return
         try:
-            self.run_logger.finalize(**kwargs)
-        except Exception:
+            fin = getattr(self.run_logger, "finalize", None)
+            _ = _call_best_effort(fin, *args, **kwargs)
+        except (OSError, TypeError, ValueError, AttributeError, RuntimeError):
             pass
 
     def close(self) -> None:
         if self.run_logger is None:
             return
         try:
-            self.run_logger.close()
-        except Exception:
+            close_fn = getattr(self.run_logger, "close", None)
+            _ = _call_best_effort(close_fn)
+        except (OSError, TypeError, ValueError, AttributeError, RuntimeError):
             pass
 
 

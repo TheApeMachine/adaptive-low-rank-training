@@ -1,7 +1,8 @@
 """
 Training runner.
 
-The training loop is inherently multi-stage (data → model → selfopt plan → optimize → eval/checkpoint).
+The training loop is inherently multi-stage
+(data → model → selfopt plan → optimize → eval/checkpoint).
 A class keeps shared state explicit and enables carving the runner into small methods.
 """
 
@@ -16,7 +17,7 @@ from typing import Protocol, cast
 
 import torch
 import torch.nn.functional as F
-
+from production.console import get_console
 from production.data import TokenView
 from production.run_config import TrainConfig
 from production.selfopt_logging import SelfOptLogger
@@ -46,6 +47,14 @@ class _BackwardTensor(Protocol):
     def backward(self) -> None: ...
 
 
+class _CudaGraphStepMarker(Protocol):
+    """Typed `cudagraph_mark_step_begin()` callable surface (CUDA-only, optional)."""
+
+    def __call__(self) -> None: ...
+
+
+
+
 class Trainer:
     """Orchestrates a single training run."""
 
@@ -57,6 +66,7 @@ class Trainer:
 
     def run(self) -> None:
         """Why: keep the public `run_train` function tiny while preserving behavior."""
+        console = get_console()
         if not self.run_cfg.data:
             raise ValueError("--data is required for --mode train")
         if not self.run_cfg.out_dir:
@@ -78,27 +88,30 @@ class Trainer:
                 pass
             self.run_cfg = TrainConfig.from_args(self.args)
 
-        data_state = load_dataset(self.run_cfg)
+        with console.status("Loading dataset…"):
+            data_state = load_dataset(self.run_cfg)
+
         train_view = cast(TokenView, data_state.train_view)
         val_view = cast(TokenView, data_state.val_view)
         cfg = self._build_model_cfg(vocab_size=data_state.vocab_size)
 
         self._write_resolved_config(cfg)
-        print_summary(args=self.args, device=self.device, cfg=cfg, n_total_tokens=int(data_state.n_total_tokens))
 
         # Config-only fast path (used by harness validation).
         if int(self.run_cfg.steps) == 0:
             return
 
-        model = self._build_model(cfg)
+        with console.status("Building model…"):
+            model = self._build_model(cfg)
 
-        model, runtime_plan = self._plan_runtime(
-            model=model,
-            cfg=cfg,
-            train_view=train_view,
-            val_view=val_view,
-            slog=slog,
-        )
+        with console.status("Planning runtime (AMP/batch/compile)…"):
+            model, runtime_plan = self._plan_runtime(
+                model=model,
+                cfg=cfg,
+                train_view=train_view,
+                val_view=val_view,
+                slog=slog,
+            )
 
         bs0, ga0 = runtime_plan.batch_plan.by_seq.get(
             int(runtime_plan.train_seq_len), next(iter(runtime_plan.batch_plan.by_seq.values()))
@@ -111,9 +124,53 @@ class Trainer:
             tok_per_step = max(1, tok_per_step)
             total_steps = int(math.ceil(float(len(train_view)) / float(tok_per_step)))
             total_steps = max(1, total_steps)
+            try:
+                self.args.steps = int(total_steps)
+            except (AttributeError, TypeError):
+                pass
 
         amp_enabled = bool(runtime_plan.amp_enabled)
         amp_dtype = runtime_plan.amp_dtype
+
+        # Resolve derived cadence knobs (warmup/save) now that total_steps is known,
+        # so the printed summary reflects real runtime behavior.
+        warmup_steps = int(self.run_cfg.warmup_steps)
+        save_every = int(self.run_cfg.save_every)
+        eval_every = int(self.run_cfg.eval_every)
+
+        def _auto_decade(x: int) -> int:
+            if x <= 0:
+                return 1
+            exp = int(max(0, int(math.floor(math.log10(float(x)))) - 1))
+            return int(math.pow(10.0, float(exp)))
+
+        if warmup_steps <= 0 and str(self.run_cfg.lr_schedule).strip().lower() == "cosine":
+            warmup_steps = int(min(max(1, _auto_decade(int(total_steps))), int(total_steps)))
+            try:
+                self.args.warmup_steps = int(warmup_steps)
+            except (AttributeError, TypeError):
+                pass
+
+        eval_recommended = int(_auto_decade(int(total_steps)))
+        if eval_every <= 0:
+            eval_every = 0
+
+        if save_every <= 0:
+            save_every = int(min(max(1, eval_recommended * 10), int(total_steps)))
+            try:
+                self.args.save_every = int(save_every)
+            except (AttributeError, TypeError):
+                pass
+
+        # Now that args are fully resolved, print the run summary.
+        print_summary(args=self.args, device=self.device, cfg=cfg, n_total_tokens=int(data_state.n_total_tokens))
+
+        try:
+            console.print(
+                f"[runtime] train_seq_len={int(runtime_plan.train_seq_len)} eval_seq_len={int(runtime_plan.eval_seq_len)} bs={int(bs0)} ga={int(ga0)} amp={int(amp_enabled)} amp_dtype={str(amp_dtype)}"
+            )
+        except (OSError, ValueError, TypeError):
+            pass
 
         scaler = None
         if amp_enabled and self.device.type == "cuda" and amp_dtype == torch.float16:
@@ -132,15 +189,27 @@ class Trainer:
         )
 
         start_step = 0
-        if bool(self.run_cfg.resume) and self.run_cfg.resume_path:
-            ck = load_checkpoint(str(self.run_cfg.resume_path))
-            if ck is not None:
+        if bool(self.run_cfg.resume):
+            resume_path = self.run_cfg.resume_path
+            if not resume_path:
                 try:
-                    _ = model.load_state_dict(ck.model_state, strict=False)
-                    opt.load_state_dict(ck.optim_state)
-                    start_step = int(max(0, ck.opt_step))
-                except (RuntimeError, ValueError, TypeError):
-                    start_step = 0
+                    if self.run_cfg.out_dir:
+                        cand = os.path.join(str(self.run_cfg.out_dir), "last.pt")
+                        if os.path.isfile(cand):
+                            resume_path = cand
+                except (OSError, TypeError, ValueError):
+                    resume_path = None
+
+            if resume_path:
+                ck = load_checkpoint(str(resume_path))
+                if ck is not None:
+                    try:
+                        _ = model.load_state_dict(ck.model_state, strict=False)
+                        opt.load_state_dict(ck.optim_state)
+                        # `opt_step` is "completed steps", so it is the next step index.
+                        start_step = int(max(0, ck.opt_step))
+                    except (RuntimeError, ValueError, TypeError):
+                        start_step = 0
 
         def get_train(bs: int, sl: int) -> tuple[torch.Tensor, torch.Tensor]:
             return data_mod.get_batch_any(
@@ -157,31 +226,89 @@ class Trainer:
         last_eval = -1
         last_save = -1
 
+        # Hot-loop constants & locals (avoid repeated attribute lookups / conversions).
+        model_call = cast(_TrainModel, model)
+        ce = F.cross_entropy
+        inv_ga = 1.0 / float(max(1, int(ga0)))
+        bs_i = int(bs0)
+        ga_i = int(ga0)
+        train_sl = int(runtime_plan.train_seq_len)
+        eval_sl = int(runtime_plan.eval_seq_len)
+        tok_per_step = int(bs_i) * int(ga_i) * int(train_sl)
+        vocab_size = int(cfg.vocab_size)
+        grad_clip = float(self.run_cfg.grad_clip)
+        log_every = int(self.run_cfg.log_every)
+        # NOTE: warmup_steps/eval_every/save_every were resolved earlier (after runtime plan),
+        # so the summary and start line match actual behavior.
+
+        # If all periodic hooks are disabled, training can look like it's "hung" because
+        # the loop is intentionally silent. Emit a one-time hint to reduce confusion.
+        if log_every <= 0 and eval_every <= 0 and save_every <= 0:
+            try:
+                console.print(
+                    "[train] No periodic hooks enabled (log/eval/save are 0). Training is still running; enable periodic logs via internal defaults if desired.",
+                    flush=True,
+                )
+            except (OSError, ValueError, TypeError, UnicodeEncodeError):
+                pass
+
+        # Always emit a persistent start line (rich status spinners can be ephemeral).
+        try:
+            start_msg = (
+                f"[train] starting: steps={int(total_steps)} (cfg.steps={int(self.run_cfg.steps)}) "
+                + f"start_step={int(start_step)} warmup={int(warmup_steps)} "
+                + f"log_every={int(log_every)} eval_every={int(eval_every)} save_every={int(save_every)}"
+            )
+            if eval_every <= 0:
+                start_msg = start_msg + f" (eval recommended ~{int(eval_recommended)})"
+            console.print(
+                start_msg,
+                flush=True,
+            )
+        except (OSError, ValueError, TypeError, UnicodeEncodeError):
+            pass
+
+        _ = model.train()
+
+        # Runtime LR adaptation state
+        loss_history: list[float] = []
+        lr_multiplier: float = 1.0
+        adapt_window: int = 50  # window for loss variance measurement
+        adapt_every: int = 20   # check every N steps
+        base_lr_config: float = float(self.run_cfg.lr)
+
         for step in range(int(start_step), int(total_steps)):
             lr = lr_for_step(
                 step,
-                base_lr=float(self.run_cfg.lr),
+                base_lr=base_lr_config * lr_multiplier,  # Apply adaptive multiplier
                 total_steps=int(total_steps),
                 schedule=str(self.run_cfg.lr_schedule),
-                warmup_steps=int(self.run_cfg.warmup_steps),
+                warmup_steps=int(warmup_steps),
                 min_lr=float(self.run_cfg.min_lr),
             )
             for pg_any in opt.param_groups:
                 pg = cast(dict[str, object], pg_any)
                 pg["lr"] = float(lr)
 
-            _ = model.train()
             opt.zero_grad(set_to_none=True)
 
-            loss_sum = 0.0
+            # Keep loss accounting on-device; one host sync per step (when/if we log).
+            loss_sum_t = torch.zeros((), device=self.device, dtype=torch.float32)
             t0 = time.perf_counter()
-            for _micro in range(int(ga0)):
-                xb, yb = get_train(int(bs0), int(runtime_plan.train_seq_len))
+            for _micro in range(int(ga_i)):
+                xb, yb = get_train(bs_i, train_sl)
                 with autocast_ctx(self.device, enabled=amp_enabled, dtype=amp_dtype):
-                    logits, _cache = cast(_TrainModel, model)(xb)
-                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), yb.reshape(-1))
-                    loss_to_back = loss / float(max(1, int(ga0)))
-                loss_sum += float(loss.detach().float().cpu().item())
+                    # CUDA graphs + compile: mark step boundaries to avoid overwritten outputs.
+                    if self.device.type == "cuda":
+                        compiler_obj: object = getattr(torch, "compiler", object())
+                        mark_obj: object = getattr(compiler_obj, "cudagraph_mark_step_begin", None)
+                        if callable(mark_obj):
+                            cast(_CudaGraphStepMarker, mark_obj)()
+                    logits, _cache = model_call(xb)
+                    # Avoid shape gymnastics in the hot path; logits last dim is vocab.
+                    loss = ce(logits.view(-1, vocab_size), yb.view(-1))
+                    loss_to_back = loss * float(inv_ga)
+                loss_sum_t = loss_sum_t + loss.detach().to(dtype=torch.float32)
                 if scaler is not None:
                     scaled = scaler.scale(loss_to_back)
                     cast(_BackwardTensor, scaled).backward()
@@ -189,7 +316,7 @@ class Trainer:
                     cast(_BackwardTensor, loss_to_back).backward()
 
             # Grad clipping (best-effort; unscale if scaler supports it).
-            if float(self.run_cfg.grad_clip) > 0.0:
+            if grad_clip > 0.0:
                 if scaler is not None:
                     unscale = getattr(cast(object, scaler), "unscale_", None)
                     if callable(unscale):
@@ -198,7 +325,7 @@ class Trainer:
                         except (RuntimeError, ValueError, TypeError):
                             pass
                 try:
-                    _ = torch.nn.utils.clip_grad_norm_(model.parameters(), float(self.run_cfg.grad_clip))
+                    _ = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 except (RuntimeError, ValueError, TypeError):
                     pass
 
@@ -210,30 +337,99 @@ class Trainer:
 
             dt = time.perf_counter() - t0
 
-            if int(self.run_cfg.log_every) > 0 and (step % int(self.run_cfg.log_every) == 0):
+            # Track loss for runtime adaptation (on-device, defer sync)
+            loss_history.append(float(loss_sum_t.item() * float(inv_ga)))
+
+            # Runtime LR adaptation: adjust based on loss curvature/variance
+            if step > adapt_window and step % adapt_every == 0:
+                recent_losses = loss_history[-adapt_window:]
+                if len(recent_losses) >= adapt_window:
+                    mean_loss = sum(recent_losses) / len(recent_losses)
+                    variance = sum((l - mean_loss) ** 2 for l in recent_losses) / len(recent_losses)
+                    rel_variance = variance / max(mean_loss ** 2, 1e-9)
+
+                    # High variance → reduce LR (gradients too noisy)
+                    # Low variance + plateau → increase LR slightly (can push harder)
+                    # Loss spiking → reduce LR aggressively
+
+                    if len(loss_history) >= adapt_window + 10:
+                        prev_window = loss_history[-(adapt_window + 10):-10]
+                        prev_mean = sum(prev_window) / len(prev_window)
+                        improvement = (prev_mean - mean_loss) / max(prev_mean, 1e-9)
+
+                        # Loss plateau (< 0.5% improvement) and low variance → can push harder
+                        if improvement < 0.005 and rel_variance < 0.01:
+                            lr_multiplier = min(1.5, lr_multiplier * 1.05)
+                        # High variance (noisy gradients) → smooth it out
+                        elif rel_variance > 0.05:
+                            lr_multiplier = max(0.5, lr_multiplier * 0.95)
+                        # Loss spike (negative improvement) → back off
+                        elif improvement < -0.01:
+                            lr_multiplier = max(0.5, lr_multiplier * 0.85)
+
+            if log_every > 0 and (step % log_every == 0):
+                # Sync only when we actually need host-visible metrics (printing).
+                # Note: loss_history already has the value, so we can skip re-computing
+                loss_avg = loss_history[-1] if loss_history else 0.0
+                tok_s = float(tok_per_step) / float(max(1e-9, dt))
+                # Show adaptive LR multiplier when it's active
+                lr_info = f"lr={lr:.3g}"
+                if abs(lr_multiplier - 1.0) > 0.01:
+                    lr_info += f" (×{lr_multiplier:.2f})"
                 try:
-                    print(f"[train] step={step} loss={loss_sum/float(max(1,int(ga0))):.4f} lr={lr:.3g} dt={dt:.3f}s", flush=True)
+                    console.print(
+                        f"[train] step={step} loss={loss_avg:.4f} {lr_info} tok/s={tok_s:.0f} dt={dt:.3f}s",
+                        flush=True,
+                    )
                 except (OSError, UnicodeEncodeError):
                     pass
 
-            do_eval = int(self.run_cfg.eval_every) > 0 and (step % int(self.run_cfg.eval_every) == 0) and step != last_eval
-            do_save = int(self.run_cfg.save_every) > 0 and (step % int(self.run_cfg.save_every) == 0) and step != last_save
+            do_eval = (
+                eval_every > 0
+                and step > 0
+                and (step % eval_every == 0)
+                and step != last_eval
+            )
+            do_save = (
+                save_every > 0
+                and (step % save_every == 0)
+                and step != last_save
+            )
             is_last = step + 1 >= int(total_steps)
 
             if do_eval or is_last:
                 last_eval = step
+                was_training = bool(getattr(model, "training", False))
+                try:
+                    _ = model.eval()
+                except Exception:
+                    was_training = False
+
                 tr_loss, va_loss = estimate_loss(
                     model=cast(_TrainModel, model),
                     get_batch_train=get_train,
                     get_batch_val=get_val,
                     eval_iters=int(self.run_cfg.eval_iters),
-                    batch_size=int(bs0),
-                    seq_len=int(runtime_plan.eval_seq_len),
-                    autocast_ctx=(lambda: autocast_ctx(self.device, enabled=amp_enabled, dtype=amp_dtype)),
+                    batch_size=bs_i,
+                    seq_len=eval_sl,
+                    autocast_ctx=(
+                        lambda: autocast_ctx(
+                            self.device, enabled=amp_enabled, dtype=amp_dtype
+                        )
+                    ),
                 )
+
+                if was_training:
+                    try:
+                        _ = model.train()
+                    except Exception:
+                        pass
                 best_val = min(best_val, float(va_loss))
                 try:
-                    print(f"[eval] step={step} train={tr_loss:.4f} val={va_loss:.4f} best={best_val:.4f}", flush=True)
+                    console.print(
+                        f"[eval] step={step} train={tr_loss:.4f} val={va_loss:.4f} best={best_val:.4f}",
+                        flush=True,
+                    )
                 except (OSError, UnicodeEncodeError):
                     pass
 
@@ -241,7 +437,7 @@ class Trainer:
                 last_save = step
                 _ = save_checkpoint(
                     out_dir=str(self.run_cfg.out_dir),
-                    opt_step=int(step),
+                    opt_step=int(step + 1),
                     model=model,
                     optimizer=opt,
                     cfg=cfg,
@@ -258,21 +454,24 @@ class Trainer:
         cfg = ModelConfig(device=self.device)
         cfg.vocab_size = int(vocab_size)
         cfg.block_size = int(self.run_cfg.block)
-        cfg.n_layer = int(self.run_cfg.layers)
-        cfg.n_head = int(self.run_cfg.n_head)
-        cfg.kv_head = self.run_cfg.kv_head
-        cfg.d_model = int(self.run_cfg.d_model)
-        cfg.d_ff = int(self.run_cfg.d_ff)
-        cfg.embed_dim = int(self.run_cfg.embed_dim)
+        # Allow depth to be controlled via intent (e.g. encoded in out_dir like `_l22_...`)
+        # without adding a CLI flag. If unset (0), ModelConfig.optimize() will choose it.
+        try:
+            cfg.n_layer = int(self.run_cfg.layers)
+        except Exception:
+            cfg.n_layer = 0
 
+        # Set mode before optimize() so mode-specific logic can use it
         cfg.attn_mode = mode_from_str(self.run_cfg.attn_mode)
-        cfg.attn_dim = int(self.run_cfg.attn_dim) if int(self.run_cfg.attn_dim) > 0 else int(cfg.d_model)
-        cfg.head_dim = int(cfg.attn_dim // max(1, cfg.n_head))
-        cfg.sem_dim = int(self.run_cfg.sem_dim)
-        cfg.geo_dim = int(self.run_cfg.geo_dim)
-
-        cfg.decoupled_gate = (not bool(self.run_cfg.no_decoupled_gate))
         cfg.rope = (not bool(self.run_cfg.no_rope))
+
+        # Budget-aware auto-sizing: target_params derived from dataset tokens (Chinchilla-style)
+        target_params: int = int(cast(int, getattr(self.args, "target_params")))
+        cfg.optimize(target_params)
+
+        # Apply experiment-specific overrides (presets/CLI) after auto-sizing
+        cfg.kv_head = self.run_cfg.kv_head
+        cfg.decoupled_gate = (not bool(self.run_cfg.no_decoupled_gate))
         cfg.rope_base = float(self.run_cfg.rope_base)
         cfg.tie_qk = bool(self.run_cfg.tie_qk)
         cfg.null_attn = bool(self.run_cfg.null_attn)
@@ -285,26 +484,40 @@ class Trainer:
 
     def _write_resolved_config(self, cfg: ModelConfig) -> None:
         """Why: emit a machine-readable record of what configuration was used."""
+        path = os.path.join(str(self.run_cfg.out_dir), "resolved_config.json")
+
+        raw_cfg_obj = cast(object, getattr(cfg, "__dict__", {}))
+        cfg_dict: dict[str, object] = {}
+        if isinstance(raw_cfg_obj, dict):
+            raw_cfg_map = cast(dict[object, object], cast(object, raw_cfg_obj))
+            for k_obj, v_obj in raw_cfg_map.items():
+                cfg_dict[str(k_obj)] = v_obj
+
+        # Make values JSON-friendly (torch types, enums).
+        if "device" in cfg_dict:
+            try:
+                cfg_dict["device"] = str(cfg_dict["device"])
+            except Exception:
+                cfg_dict["device"] = "cpu"
+        if "attn_mode" in cfg_dict and hasattr(cfg_dict["attn_mode"], "value"):
+            cfg_dict["attn_mode"] = getattr(cfg_dict["attn_mode"], "value")
+
+        # Paper harness expects model keys at top-level (attn_mode/rope/tie_qk/null_attn).
+        payload: dict[str, object] = dict(cfg_dict)
+        payload["train"] = dict(getattr(self.run_cfg, "__dict__", {}))
+        payload["model"] = dict(cfg_dict)
+
+        os.makedirs(str(self.run_cfg.out_dir), exist_ok=True)
         try:
-            path = os.path.join(str(self.run_cfg.out_dir), "resolved_config.json")
-            raw_cfg_obj = cast(object, getattr(cfg, "__dict__", {}))
-            cfg_dict: dict[str, object] = {}
-            if isinstance(raw_cfg_obj, dict):
-                raw_cfg_map = cast(dict[object, object], cast(object, raw_cfg_obj))
-                for k_obj, v_obj in raw_cfg_map.items():
-                    cfg_dict[str(k_obj)] = v_obj
-            # Make enums JSON-friendly.
-            if "attn_mode" in cfg_dict and hasattr(cfg_dict["attn_mode"], "value"):
-                cfg_dict["attn_mode"] = getattr(cfg_dict["attn_mode"], "value")
-            payload = {
-                "train": dict(getattr(self.run_cfg, "__dict__", {})),
-                "model": cfg_dict,
-            }
-            os.makedirs(str(self.run_cfg.out_dir), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 _ = f.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-        except (OSError, ValueError, TypeError):
-            pass
+        except (OSError, ValueError, TypeError) as e:
+            # Do not fail training, but do not silently ignore reproducibility artifacts either.
+            try:
+                console = get_console()
+                console.print(f"[warn] Failed to write resolved_config.json: {e}")
+            except Exception:
+                pass
 
     def _plan_runtime(
         self,
@@ -349,5 +562,3 @@ class Trainer:
             eval_seq_len_cap=eval_seq_cap,
         )
         return model2, runtime_plan
-
-

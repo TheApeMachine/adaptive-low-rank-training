@@ -1,5 +1,5 @@
 {
-    "version": 1,
+    "version": 2,
     "notes": "Canonical paper run manifest. FineWeb-Edu only. Production implementation only (main.py).",
     "defaults": {
         "tokenizer": "tiktoken",
@@ -15,14 +15,14 @@
     "groups": [
         {
             "name": "mac_fw100m",
-            "description": "Macbook suite on FineWeb-Edu 100M tokens. Longer-than-6k runs to address 'too few steps'.",
+            "description": "Macbook suite on FineWeb-Edu 100M tokens: 3-seed core comparisons + low-cost ablations/fairness checks.",
             "data": "fineweb_100m.npy",
             "runs": [
                 {
                     "id": "mac_fw100m_l12_baseline_s1337",
                     "exp": "paper_baseline",
                     "seed": 1337,
-                    "wandb_mode": "online",
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "standard"
                     }
@@ -31,7 +31,7 @@
                     "id": "mac_fw100m_l12_bottleneck_s1337",
                     "exp": "paper_bottleneck",
                     "seed": 1337,
-                    "wandb_mode": "online",
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "bottleneck"
                     }
@@ -40,7 +40,7 @@
                     "id": "mac_fw100m_l12_decoupled_s1337",
                     "exp": "paper_decoupled",
                     "seed": 1337,
-                    "wandb_mode": "online",
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "decoupled",
                         "null_attn": false,
@@ -52,34 +52,34 @@
                     "id": "mac_fw100m_l12_gqa_s1337",
                     "exp": "paper_gqa",
                     "seed": 1337,
-                    "wandb_mode": "online",
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "gqa"
                     }
                 },
                 {
-                    "id": "mac_fw100m_l24_baseline_s1337",
+                    "id": "mac_fw100m_l12_baseline_s1338",
                     "exp": "paper_baseline",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1338,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "standard"
                     }
                 },
                 {
-                    "id": "mac_fw100m_l24_bottleneck_s1337",
+                    "id": "mac_fw100m_l12_bottleneck_s1338",
                     "exp": "paper_bottleneck",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1338,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "bottleneck"
                     }
                 },
                 {
-                    "id": "mac_fw100m_l24_decoupled_s1337",
+                    "id": "mac_fw100m_l12_decoupled_s1338",
                     "exp": "paper_decoupled",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1338,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "decoupled",
                         "null_attn": false,
@@ -88,40 +88,37 @@
                     }
                 },
                 {
-                    "id": "mac_fw100m_l24_gqa_s1337",
+                    "id": "mac_fw100m_l12_gqa_s1338",
                     "exp": "paper_gqa",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1338,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "gqa"
                     }
                 },
                 {
-                    "id": "mac_fw100m_large_baseline_s1337",
-                    "size": "large",
+                    "id": "mac_fw100m_l12_baseline_s1339",
                     "exp": "paper_baseline",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1339,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "standard"
                     }
                 },
                 {
-                    "id": "mac_fw100m_large_bottleneck_s1337",
-                    "size": "large",
+                    "id": "mac_fw100m_l12_bottleneck_s1339",
                     "exp": "paper_bottleneck",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1339,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "bottleneck"
                     }
                 },
                 {
-                    "id": "mac_fw100m_large_decoupled_s1337",
-                    "size": "large",
+                    "id": "mac_fw100m_l12_decoupled_s1339",
                     "exp": "paper_decoupled",
-                    "seed": 1337,
-                    "wandb_mode": "online",
+                    "seed": 1339,
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "decoupled",
                         "null_attn": false,
@@ -130,27 +127,107 @@
                     }
                 },
                 {
-                    "id": "mac_fw100m_large_gqa_s1337",
-                    "size": "large",
+                    "id": "mac_fw100m_l12_gqa_s1339",
                     "exp": "paper_gqa",
                     "seed": 1337,
-                    "wandb_mode": "online",
+                    "steps": 6000,
                     "expected": {
                         "attn_mode": "gqa"
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_baseline_lr2e4_s1337",
+                    "exp": "paper_baseline_lr2e4",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "standard"
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_baseline_lr3e4_s1337",
+                    "exp": "paper_baseline_lr3e4",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "standard"
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_baseline_lr4e4_s1337",
+                    "exp": "paper_baseline_lr4e4",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "standard"
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_baseline_12000_s1337",
+                    "exp": "paper_baseline_lr3e4",
+                    "seed": 1337,
+                    "steps": 12000,
+                    "expected": {
+                        "attn_mode": "standard"
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_decoupled_12000_s1337",
+                    "exp": "paper_decoupled",
+                    "seed": 1337,
+                    "steps": 12000,
+                    "expected": {
+                        "attn_mode": "decoupled",
+                        "null_attn": false,
+                        "tie_qk": true,
+                        "rope": true
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_decoupled_null_s1337",
+                    "exp": "paper_decoupled_null",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "decoupled",
+                        "null_attn": true,
+                        "tie_qk": true,
+                        "rope": true
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_decoupled_notieqk_s1337",
+                    "exp": "paper_decoupled_notieqk",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "decoupled",
+                        "null_attn": false,
+                        "tie_qk": false,
+                        "rope": true
+                    }
+                },
+                {
+                    "id": "mac_fw100m_l12_decoupled_norope_s1337",
+                    "exp": "paper_decoupled_norope",
+                    "seed": 1337,
+                    "steps": 6000,
+                    "expected": {
+                        "attn_mode": "decoupled",
+                        "rope": false
                     }
                 }
             ]
         },
         {
             "name": "a100_fw1b_1bscale",
-            "description": "A100 month-scale suite: 1B baseline vs 1B decoupled with progressive context curriculum (trained on fineweb_20b tokens).",
+            "description": "A100 scale confirmation: 1B baseline vs 1B decoupled (trained on fineweb_20b tokens).",
             "data": "fineweb_20b.npy",
             "runs": [
                 {
                     "id": "a100_fw1b_l22_baseline_s1337",
                     "exp": "paper_baseline",
                     "seed": 1337,
-                    "wandb_mode": "online",
                     "resume": true,
                     "expected": {
                         "attn_mode": "standard"
@@ -160,7 +237,6 @@
                     "id": "a100_fw1b_l22_decoupled_s1337",
                     "exp": "paper_decoupled",
                     "seed": 1337,
-                    "wandb_mode": "online",
                     "resume": true,
                     "expected": {
                         "attn_mode": "decoupled",
