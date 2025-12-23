@@ -8,3 +8,5 @@ tensorboard
 rich
 h5py
 wandb
+pydantic
+PyYAML

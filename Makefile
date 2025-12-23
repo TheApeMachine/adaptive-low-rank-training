@@ -1,18 +1,18 @@
-.PHONY: train paper_all paper_data paper_experiments paper_analyze paper_baseline paper_bottleneck paper_decoupled paper_gqa paper_deep paper_smoke print_config install_deps test test_verbose
+.PHONY: train paper_all paper_data paper_experiments paper_analyze paper_baseline paper_bottleneck paper_decoupled paper_gqa paper_deep paper_smoke print_config install_deps test test_verbose test_caramba
 
 # Default python used by utility targets (tests, analysis helpers, etc.)
 # Override if you want a specific interpreter, e.g. `make test PY=python3.12`.
 PY ?= python3
 
 train:
-	# python3 v1_gradient_grouping.py --mode baseline 
+	# python3 v1_gradient_grouping.py --mode baseline
 	# python3 v1_gradient_grouping.py --mode grouped --sim-threshold 0.9
 	# python3 v1_gradient_grouping.py --mode coarse_to_fine
 
-	# python3 v2_optimized_gradient_grouping.py --mode baseline 
-	# python3 v2_optimized_gradient_grouping.py --sim-threshold 0.9 --mode grouped 
+	# python3 v2_optimized_gradient_grouping.py --mode baseline
+	# python3 v2_optimized_gradient_grouping.py --sim-threshold 0.9 --mode grouped
 	# python3 v2_optimized_gradient_grouping.py --mode coarse_to_fine
-	
+
 	# python3 v3_adaptive_lowrank.py
 	# python3 v3_adaptive_lowrank.py --epochs 30
 	# python3 v3_adaptive_lowrank.py --init-rank1 128 --init-rank2 64
@@ -20,17 +20,17 @@ train:
 	# python3 v4_adaptive_lowrank_rand.py
 	# python3 v4_adaptive_lowrank_rand.py --epochs 30
 	# python3 v4_adaptive_lowrank_rand.py --init-rank1 128 --init-rank2 64
-	
+
 	# python3 v5_multi_layer_adaptive.py
 	# python3 v5_multi_layer_adaptive.py --epochs 30
 	# python3 v5_multi_layer_adaptive.py --init-rank1 128 --init-rank2 64
 	# python3 v5_1_multi_layer_adaptive_smooth.py --epochs 30
 	# python3 v5_1_multi_layer_adaptive_smooth.py --init-rank1 128 --init-rank2 64
-	
+
 	# python3 v6_lowrank_backprop.py
 	# python3 v6_lowrank_backprop.py --epochs 30
 	# python3 v6_lowrank_backprop.py --init-rank1 128 --init-rank2 64
-	
+
 	# python3 v7_transformer_dense_baseline.py --epochs 5
 	# python3 v7_transformer_dense_baseline.py --epochs 25
 	# python3 v7_transformer_dense_baseline.py --epochs 50
@@ -49,11 +49,11 @@ train:
 	# python3 v7_5_transformer_lowrank_adaptive.py --epochs 15
 	# python3 v7_5_transformer_lowrank_adaptive.py --epochs 20 --init-rank 32
 	# python3 v7_5_transformer_lowrank_adaptive.py --epochs 30 --init-rank 64
-	
+
 	# python3 v8_transformer_lowrank_spectral.py --epochs 15
 	# python3 v8_transformer_lowrank_spectral.py --epochs 20 --init-rank 32
 	# python3 v8_transformer_lowrank_spectral.py --epochs 30 --init-rank 64
-	
+
 	# python3 v9_transformer_lowrank_spectral_bidirectional.py --epochs 30 --init-rank 64 --data-file wiki.train.tokens --log-file v9_log.jsonl
 
 	# python3 v10_transformer_lowrank_scaled.py \
@@ -536,7 +536,7 @@ paper_analyze:
 # -----------------------------------------------------------------------------
 
 # Standard Baseline: Full-rank attention
-paper_baseline: 
+paper_baseline:
 	@echo ""
 	@echo ">>> [1/4] Standard Baseline ($(SIZE): d=$(D_MODEL), L=$(N_LAYER))..."
 	@echo "=============================================="
@@ -562,7 +562,7 @@ paper_baseline:
 		--analysis-every 100
 
 # Bottleneck: Compressed attention (d_attn = d_model/8)
-paper_bottleneck: 
+paper_bottleneck:
 	@echo ""
 	@echo ">>> [2/4] Bottleneck ($(SIZE): d_attn=$(ATTN_DIM))..."
 	@echo "=============================================="
@@ -590,7 +590,7 @@ paper_bottleneck:
 		--analysis-every 100
 
 # Decoupled: Semantic + Geometric split
-paper_decoupled: 
+paper_decoupled:
 	@echo ""
 	@echo ">>> [3/4] Decoupled ($(SIZE): sem=$(SEM_DIM), geo=$(GEO_DIM))..."
 	@echo "=============================================="
@@ -621,7 +621,7 @@ paper_decoupled:
 		--analysis-every 100
 
 # GQA: Grouped Query Attention
-paper_gqa: 
+paper_gqa:
 	@echo ""
 	@echo ">>> [4/4] GQA ($(SIZE): $(N_HEAD)Q/$(KV_HEAD)KV heads)..."
 	@echo "=============================================="
@@ -652,7 +652,7 @@ paper_gqa:
 # HEAVY INSTRUMENTATION (for deep analysis, slower)
 # -----------------------------------------------------------------------------
 
-paper_deep: 
+paper_deep:
 	@echo ">>> Running with HEAVY instrumentation ($(SIZE))..."
 	@echo "This will be ~30% slower but capture full attention matrices."
 	python3.12 v21_transformer_decoupled_bottleneck_gqa.py \
@@ -1541,3 +1541,7 @@ run_v24_flash2pass:
 		--kv-cache q4_0 \
 		--steps 500 \
 		--batch-size 2
+
+test_caramba:
+	@echo ">>> Testing Caramba..."
+	python3.12 -m unittest discover -s caramba -p "*_test.py" -q

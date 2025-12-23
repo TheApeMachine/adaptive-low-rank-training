@@ -1,0 +1,42 @@
+version: 1
+name: dba
+notes: "Decoupled Bottleneck Attention (placeholder) - opinionated manifest."
+defaults:
+  tokenizer: tiktoken
+  val_frac: 0.1
+  instrument: rich
+  wandb: true
+  wandb_project: ""
+  wandb_entity: ""
+  wandb_mode: online
+  eval_iters: 20
+  save_every: 0
+model:
+  type: transformer
+  network:
+    type: stacked
+    layers:
+      - type: linear
+        d_in: 128
+        d_out: 128
+        bias: true
+      - type: layer_norm
+        d_model: 128
+        eps: 1e-5
+        elementwise_affine: true
+      - type: multihead
+        d_model: 128
+        n_heads: 4
+        dropout: 0.1
+groups:
+  - name: default
+    description: Default group
+    data: ""
+    runs:
+      - id: default
+        mode: train
+        exp: dba
+        seed: 1337
+        steps: 1000
+        expected:
+          attn_mode: standard

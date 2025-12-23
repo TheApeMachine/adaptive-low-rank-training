@@ -1,9 +1,0 @@
----
-alwaysApply: true
----
-
-In correct Python, when using types, you have to type things correctly.
-Do NOT use Any.
-Do NOT use suppression comments.
-MINIMIZE casting.
-Type things correctly.
