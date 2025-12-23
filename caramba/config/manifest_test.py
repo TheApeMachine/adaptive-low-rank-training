@@ -34,12 +34,17 @@ class ManifestTest(unittest.TestCase):
                         "  wandb: false",
                         "model:",
                         "  type: transformer",
-                        "  network:",
+                        "  topology:",
                         "    type: stacked",
                         "    layers:",
                         "      - type: linear",
-                        "        d_in: 128",
-                        "        d_out: 128",
+                        "        operation:",
+                        "          type: matmul",
+                        "        weight:",
+                        "          type: dense",
+                        "          d_in: 128",
+                        "          d_out: 128",
+                        "          bias: true",
                         "groups:",
                         "  - name: g",
                         "    description: d",
@@ -72,9 +77,20 @@ class ManifestTest(unittest.TestCase):
                 "defaults": {"wandb": False},
                 "model": {
                     "type": "transformer",
-                    "network": {
+                    "topology": {
                         "type": "stacked",
-                        "layers": [{"type": "linear", "d_in": 128, "d_out": 128}],
+                        "layers": [
+                            {
+                                "type": "linear",
+                                "operation": {"type": "matmul"},
+                                "weight": {
+                                    "type": "dense",
+                                    "d_in": 128,
+                                    "d_out": 128,
+                                    "bias": True,
+                                },
+                            }
+                        ],
                     },
                 },
                 "groups": [
@@ -115,7 +131,7 @@ class ManifestTest(unittest.TestCase):
                         "defaults: {wandb: false}",
                         "model:",
                         "  type: transformer",
-                        "  network:",
+                        "  topology:",
                         "    type: stacked",
                         "    layers:",
                         "      - type: linear",

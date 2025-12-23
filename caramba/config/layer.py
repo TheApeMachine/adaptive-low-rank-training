@@ -7,6 +7,21 @@ import enum
 from typing import Annotated, Literal, TypeAlias
 from pydantic import BaseModel, Field
 
+from caramba.config.operation import (
+    LayerNormOperationConfig,
+    MatmulOperationConfig,
+    MultiheadOperationConfig,
+    DropoutOperationConfig,
+    AttentionOperationConfig,
+)
+from caramba.config.weight import (
+    DecoupledAttentionWeightConfig,
+    DenseWeightConfig,
+    LlamaAttentionWeightConfig,
+    MultiheadWeightConfig,
+    NormWeightConfig,
+)
+
 
 class LayerType(str, enum.Enum):
     """
@@ -14,12 +29,9 @@ class LayerType(str, enum.Enum):
     """
     LAYER_NORM = "layer_norm"
     LINEAR = "linear"
-    SEQUENTIAL = "sequential"
-    CONVOLUTIONAL = "convolutional"
     MULTIHEAD = "multihead"
-    POOLING = "pooling"
-    NORMALIZATION = "normalization"
     DROPOUT = "dropout"
+    ATTENTION = "attention"
 
 
 class _LayerConfigBase(BaseModel):
@@ -31,17 +43,8 @@ class LinearLayerConfig(_LayerConfigBase):
     LinearLayerConfig provides the linear layer configuration.
     """
     type: Literal[LayerType.LINEAR] = LayerType.LINEAR
-    d_in: int
-    d_out: int
-    bias: bool = True
-
-
-class SequentialLayerConfig(_LayerConfigBase):
-    """
-    SequentialLayerConfig provides the sequential layer configuration.
-    """
-    type: Literal[LayerType.SEQUENTIAL] = LayerType.SEQUENTIAL
-    layers: list[LayerConfig]
+    operation: MatmulOperationConfig
+    weight: DenseWeightConfig
 
 
 class LayerNormLayerConfig(_LayerConfigBase):
@@ -49,9 +52,8 @@ class LayerNormLayerConfig(_LayerConfigBase):
     LayerNormLayerConfig provides the layer normalization layer configuration.
     """
     type: Literal[LayerType.LAYER_NORM] = LayerType.LAYER_NORM
-    d_model: int
-    eps: float = 1e-5
-    elementwise_affine: bool = True
+    operation: LayerNormOperationConfig
+    weight: NormWeightConfig
 
 
 class MultiheadLayerConfig(_LayerConfigBase):
@@ -59,9 +61,8 @@ class MultiheadLayerConfig(_LayerConfigBase):
     MultiheadLayerConfig provides the multihead layer configuration.
     """
     type: Literal[LayerType.MULTIHEAD] = LayerType.MULTIHEAD
-    d_model: int
-    n_heads: int
-    dropout: float = 0.0
+    operation: MultiheadOperationConfig
+    weight: MultiheadWeightConfig
 
 
 class DropoutLayerConfig(_LayerConfigBase):
@@ -69,14 +70,24 @@ class DropoutLayerConfig(_LayerConfigBase):
     DropoutLayerConfig provides the dropout layer configuration.
     """
     type: Literal[LayerType.DROPOUT] = LayerType.DROPOUT
-    p: float = 0.0
+    operation: DropoutOperationConfig
+
+
+class AttentionLayerConfig(_LayerConfigBase):
+    """
+    AttentionLayerConfig provides attention layer configuration.
+    """
+
+    type: Literal[LayerType.ATTENTION] = LayerType.ATTENTION
+    operation: AttentionOperationConfig
+    weight: LlamaAttentionWeightConfig | DecoupledAttentionWeightConfig
 
 
 LayerConfig: TypeAlias = Annotated[
     LinearLayerConfig
     | LayerNormLayerConfig
     | MultiheadLayerConfig
-    | SequentialLayerConfig
-    | DropoutLayerConfig,
+    | DropoutLayerConfig
+    | AttentionLayerConfig,
     Field(discriminator="type"),
 ]

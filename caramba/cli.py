@@ -11,7 +11,7 @@ import argparse
 from pathlib import Path
 from caramba.config.mode import Mode
 from caramba.config.model import ModelConfig, ModelType
-from caramba.config.topology import TopologyConfig, TopologyType
+from caramba.config.topology import StackedTopologyConfig
 from caramba.config.defaults import Defaults
 from caramba.config.group import Group
 from caramba.config.manifest import Manifest
@@ -171,10 +171,7 @@ class CLI(argparse.ArgumentParser):
             notes="",
             model=ModelConfig(
                 type=ModelType.TRANSFORMER,
-                topology=TopologyConfig(
-                    type=TopologyType.STACKED,
-                    layers=[],
-                ),
+                topology=StackedTopologyConfig(layers=[]),
             ),
             defaults=Defaults(
                 wandb_entity=args.entity,

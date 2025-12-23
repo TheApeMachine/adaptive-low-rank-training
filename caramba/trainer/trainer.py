@@ -22,6 +22,3 @@ class Trainer:
         """
         Run the training loop.
         """
-        pass
-
-

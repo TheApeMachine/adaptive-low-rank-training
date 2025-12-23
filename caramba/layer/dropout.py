@@ -6,6 +6,7 @@ from __future__ import annotations
 from torch import nn, Tensor
 from typing_extensions import override
 from caramba.config.layer import DropoutLayerConfig
+from caramba.operation.dropout import Drop
 
 
 class Dropout(nn.Module):
@@ -15,11 +16,11 @@ class Dropout(nn.Module):
     def __init__(self, config: DropoutLayerConfig) -> None:
         super().__init__()
         self.config: DropoutLayerConfig = config
-        self.dropout: nn.Dropout = nn.Dropout(config.p)
+        self.operation: Drop = Drop(config.operation.p)
 
     @override
     def forward(self, x: Tensor) -> Tensor:
         """
         forward pass for the dropout layer.
         """
-        return self.dropout(x)
+        return self.operation.forward(x)

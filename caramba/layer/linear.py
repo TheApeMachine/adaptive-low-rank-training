@@ -7,6 +7,8 @@ from torch import nn, Tensor
 from typing_extensions import override
 
 from caramba.config.layer import LinearLayerConfig
+from caramba.operation.matmul import Matmul
+from caramba.weight.dense import DenseWeight
 
 
 class Linear(nn.Module):
@@ -16,10 +18,12 @@ class Linear(nn.Module):
 
     def __init__(self, config: LinearLayerConfig) -> None:
         super().__init__()
-        self.linear: nn.Linear = nn.Linear(
-            config.d_in,
-            config.d_out,
-            bias=config.bias,
+        self.config: LinearLayerConfig = config
+        self.operation: Matmul = Matmul()
+        self.weight: DenseWeight = DenseWeight(
+            config.weight.d_in,
+            config.weight.d_out,
+            bias=bool(config.weight.bias),
         )
 
     @override
@@ -27,6 +31,10 @@ class Linear(nn.Module):
         """
         forward pass for the linear layer.
         """
-        return self.linear(x)
+        return self.operation.forward(
+            x,
+            weight=self.weight.weight,
+            bias=self.weight.bias,
+        )
 
 

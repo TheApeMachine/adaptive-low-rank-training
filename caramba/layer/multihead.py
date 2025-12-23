@@ -7,6 +7,8 @@ from torch import nn, Tensor
 from typing_extensions import override
 
 from caramba.config.layer import MultiheadLayerConfig
+from caramba.operation.multihead import MultiheadOp
+from caramba.weight.multihead import MultiheadWeight
 
 
 class Multihead(nn.Module):
@@ -16,11 +18,11 @@ class Multihead(nn.Module):
     def __init__(self, config: MultiheadLayerConfig) -> None:
         super().__init__()
         self.config: MultiheadLayerConfig = config
-        self.multihead: nn.MultiheadAttention = nn.MultiheadAttention(
-            embed_dim=config.d_model,
-            num_heads=config.n_heads,
-            dropout=config.dropout,
-            batch_first=True,
+        self.operation: MultiheadOp = MultiheadOp()
+        self.weight: MultiheadWeight = MultiheadWeight(
+            d_model=int(config.weight.d_model),
+            n_heads=int(config.weight.n_heads),
+            dropout=float(config.weight.dropout),
         )
 
     @override
@@ -28,4 +30,4 @@ class Multihead(nn.Module):
         """
         forward pass for the multihead layer.
         """
-        return self.multihead(x, x, x, need_weights=False)[0]
+        return self.operation.forward(x, attn=self.weight.attn)
