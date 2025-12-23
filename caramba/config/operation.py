@@ -17,9 +17,11 @@ class OperationType(str, enum.Enum):
 
     MATMUL = "matmul"
     LAYER_NORM = "layer_norm"
+    RMS_NORM = "rms_norm"
     DROPOUT = "dropout"
     MULTIHEAD = "multihead"
     ATTENTION = "attention"
+    SWIGLU = "swiglu"
 
 
 class _OperationConfigBase(BaseModel):
@@ -42,6 +44,14 @@ class LayerNormOperationConfig(_OperationConfigBase):
     """
 
     type: Literal[OperationType.LAYER_NORM] = OperationType.LAYER_NORM
+    eps: float = 1e-5
+
+
+class RMSNormOperationConfig(_OperationConfigBase):
+    """
+    RMSNormOperationConfig provides RMSNorm configuration.
+    """
+    type: Literal[OperationType.RMS_NORM] = OperationType.RMS_NORM
     eps: float = 1e-5
 
 
@@ -72,12 +82,21 @@ class AttentionOperationConfig(_OperationConfigBase):
     dropout_p: float = 0.0
 
 
+class SwiGLUOperationConfig(_OperationConfigBase):
+    """
+    SwiGLUOperationConfig provides SwiGLU configuration.
+    """
+    type: Literal[OperationType.SWIGLU] = OperationType.SWIGLU
+
+
 OperationConfig: TypeAlias = Annotated[
     MatmulOperationConfig
     | LayerNormOperationConfig
+    | RMSNormOperationConfig
     | DropoutOperationConfig
     | MultiheadOperationConfig
-    | AttentionOperationConfig,
+    | AttentionOperationConfig
+    | SwiGLUOperationConfig,
     Field(discriminator="type"),
 ]
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing_extensions import TypeGuard
 from torch import nn
+from caramba.config.layer import LayerConfig, _LayerConfigBase
 from caramba.config.topology import TopologyConfig, TopologyType, _TopologyConfigBase
 from caramba.topology.nested import Nested
 from caramba.topology.sequential import Sequential
@@ -21,6 +22,12 @@ def is_topology_config(config: object) -> TypeGuard[TopologyConfig]:
     is_topology_config checks if config is a topology config instance.
     """
     return isinstance(config, _TopologyConfigBase)
+
+def is_layer_config(config: object) -> TypeGuard[LayerConfig]:
+    """
+    is_layer_config checks if config is a layer config instance.
+    """
+    return isinstance(config, _LayerConfigBase)
 
 
 def build(config: TopologyConfig) -> nn.Module:
@@ -53,7 +60,9 @@ def build(config: TopologyConfig) -> nn.Module:
     for layer in out.config.layers:
         if is_topology_config(layer):
             out.layers.append(build(layer))
-        else:
+        elif is_layer_config(layer):
             out.layers.append(build_layer(layer))
+        else:
+            raise ValueError(f"Unsupported layer type: {type(layer)}")
 
     return out

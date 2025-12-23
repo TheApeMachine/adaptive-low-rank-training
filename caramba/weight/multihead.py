@@ -4,7 +4,8 @@ multihead provides multihead attention weight containers.
 
 from __future__ import annotations
 
-from torch import nn
+from torch import Tensor, nn
+from typing_extensions import override
 
 
 class MultiheadWeight(nn.Module):
@@ -19,6 +20,16 @@ class MultiheadWeight(nn.Module):
             num_heads=int(n_heads),
             dropout=float(dropout),
             batch_first=True,
+        )
+
+    @override
+    def forward(self, *args: object, **kwargs: object) -> Tensor:
+        """
+        forward is intentionally unsupported for weight containers.
+        """
+        _ = (args, kwargs)
+        raise RuntimeError(
+            "MultiheadWeight is a weight container; call Multihead.forward."
         )
 
 

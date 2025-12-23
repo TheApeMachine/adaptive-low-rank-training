@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from torch import Tensor, nn
 import torch.nn.init as init
+from typing_extensions import override
 
 
 class LayerNormWeight(nn.Module):
@@ -39,5 +40,15 @@ class LayerNormWeight(nn.Module):
             init.ones_(self.weight)
         if self.bias is not None:
             init.zeros_(self.bias)
+
+    @override
+    def forward(self, *args: object, **kwargs: object) -> Tensor:
+        """
+        forward is intentionally unsupported for weight containers.
+        """
+        _ = (args, kwargs)
+        raise RuntimeError(
+            "LayerNormWeight is a weight container; call Normalize.forward."
+        )
 
 

@@ -16,6 +16,7 @@ from caramba.config.defaults import Defaults
 from caramba.config.group import Group
 from caramba.config.manifest import Manifest
 from caramba.config.run import Run
+from caramba.compiler import lower_manifest
 
 
 class _Args(argparse.Namespace):
@@ -163,9 +164,9 @@ class CLI(argparse.ArgumentParser):
         args = self.parse_args(argv, namespace=_Args())
 
         if args.manifest.exists():
-            return Manifest.from_path(args.manifest)
+            return lower_manifest(Manifest.from_path(args.manifest))
 
-        return Manifest(
+        return lower_manifest(Manifest(
             version=1,
             name="",
             notes="",
@@ -196,4 +197,4 @@ class CLI(argparse.ArgumentParser):
                     ],
                 )
             ],
-        )
+        ))

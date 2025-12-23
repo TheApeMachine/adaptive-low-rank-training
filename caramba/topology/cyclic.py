@@ -23,8 +23,6 @@ class Cyclic(nn.Module):
         """
         forward pass for the cyclic topology.
         """
-        for _ in range(int(self.config.repeat)):
-            for layer in self.layers:
-                x = layer.forward(x)
-
+        for layer in self.layers:
+            x = layer.forward(x)
         return x

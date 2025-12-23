@@ -23,11 +23,6 @@ class Recurrent(nn.Module):
         """
         forward pass for the recurrent topology.
         """
-        for _ in range(int(self.config.repeat)):
-            x = self.layers[0].forward(x)
-            for layer in self.layers[1:]:
-                residual = x
-                x = layer.forward(x)
-                x = residual + x
-
+        for layer in self.layers:
+            x = layer.forward(x)
         return x

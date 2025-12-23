@@ -9,10 +9,12 @@ from pydantic import BaseModel, Field
 
 from caramba.config.operation import (
     LayerNormOperationConfig,
+    RMSNormOperationConfig,
     MatmulOperationConfig,
     MultiheadOperationConfig,
     DropoutOperationConfig,
     AttentionOperationConfig,
+    SwiGLUOperationConfig,
 )
 from caramba.config.weight import (
     DecoupledAttentionWeightConfig,
@@ -20,6 +22,8 @@ from caramba.config.weight import (
     LlamaAttentionWeightConfig,
     MultiheadWeightConfig,
     NormWeightConfig,
+    RMSNormWeightConfig,
+    SwiGLUWeightConfig,
 )
 
 
@@ -28,10 +32,12 @@ class LayerType(str, enum.Enum):
     LayerType provides the layer type.
     """
     LAYER_NORM = "layer_norm"
+    RMS_NORM = "rms_norm"
     LINEAR = "linear"
     MULTIHEAD = "multihead"
     DROPOUT = "dropout"
     ATTENTION = "attention"
+    SWIGLU = "swiglu"
 
 
 class _LayerConfigBase(BaseModel):
@@ -54,6 +60,15 @@ class LayerNormLayerConfig(_LayerConfigBase):
     type: Literal[LayerType.LAYER_NORM] = LayerType.LAYER_NORM
     operation: LayerNormOperationConfig
     weight: NormWeightConfig
+
+
+class RMSNormLayerConfig(_LayerConfigBase):
+    """
+    RMSNormLayerConfig provides RMSNorm layer configuration.
+    """
+    type: Literal[LayerType.RMS_NORM] = LayerType.RMS_NORM
+    operation: RMSNormOperationConfig
+    weight: RMSNormWeightConfig
 
 
 class MultiheadLayerConfig(_LayerConfigBase):
@@ -83,11 +98,22 @@ class AttentionLayerConfig(_LayerConfigBase):
     weight: LlamaAttentionWeightConfig | DecoupledAttentionWeightConfig
 
 
+class SwiGLULayerConfig(_LayerConfigBase):
+    """
+    SwiGLULayerConfig provides SwiGLU MLP configuration.
+    """
+    type: Literal[LayerType.SWIGLU] = LayerType.SWIGLU
+    operation: SwiGLUOperationConfig
+    weight: SwiGLUWeightConfig
+
+
 LayerConfig: TypeAlias = Annotated[
     LinearLayerConfig
     | LayerNormLayerConfig
+    | RMSNormLayerConfig
     | MultiheadLayerConfig
     | DropoutLayerConfig
-    | AttentionLayerConfig,
+    | AttentionLayerConfig
+    | SwiGLULayerConfig,
     Field(discriminator="type"),
 ]

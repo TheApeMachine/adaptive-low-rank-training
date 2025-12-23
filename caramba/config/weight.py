@@ -17,6 +17,8 @@ class WeightType(str, enum.Enum):
 
     DENSE = "dense"
     NORM = "norm"
+    RMS_NORM = "rms_norm"
+    SWIGLU = "swiglu"
     MULTIHEAD = "multihead"
     LLAMA_ATTENTION = "llama_attention"
     DECOUPLED_ATTENTION = "decoupled_attention"
@@ -47,6 +49,24 @@ class NormWeightConfig(_WeightConfigBase):
     type: Literal[WeightType.NORM] = WeightType.NORM
     d_model: int
     elementwise_affine: bool = True
+
+
+class RMSNormWeightConfig(_WeightConfigBase):
+    """
+    RMSNormWeightConfig provides RMSNorm weight configuration.
+    """
+    type: Literal[WeightType.RMS_NORM] = WeightType.RMS_NORM
+    d_model: int
+
+
+class SwiGLUWeightConfig(_WeightConfigBase):
+    """
+    SwiGLUWeightConfig provides SwiGLU weight configuration.
+    """
+    type: Literal[WeightType.SWIGLU] = WeightType.SWIGLU
+    d_model: int
+    d_ff: int
+    bias: bool = False
 
 
 class MultiheadWeightConfig(_WeightConfigBase):
@@ -94,6 +114,8 @@ class DecoupledAttentionWeightConfig(_WeightConfigBase):
 WeightConfig: TypeAlias = Annotated[
     DenseWeightConfig
     | NormWeightConfig
+    | RMSNormWeightConfig
+    | SwiGLUWeightConfig
     | MultiheadWeightConfig
     | LlamaAttentionWeightConfig
     | DecoupledAttentionWeightConfig,
