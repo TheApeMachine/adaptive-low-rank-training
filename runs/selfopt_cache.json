@@ -1,5 +1,38 @@
 {
   "runtime_plan": {
+    "mps|train_runtime|cfg=b712294702d7e5b6|seq=512": {
+      "plan": {
+        "amp_dtype": "torch.bfloat16",
+        "amp_enabled": true,
+        "batch_plan": {
+          "by_seq": {
+            "512": [
+              8,
+              37
+            ]
+          },
+          "iters": 2,
+          "target_gbs": 0,
+          "warmup": 1
+        },
+        "compile_plan": {
+          "enabled": false,
+          "hysteresis": 0.03,
+          "iters": 2,
+          "mode": "reduce-overhead",
+          "warmup": 1
+        },
+        "eval_seq_len": 512,
+        "metrics": {
+          "t_batch_tune_s": 69.99644808308221,
+          "t_compile_tune_s": 0.00011933292262256145,
+          "t_precision_s": 0.06927350000478327
+        },
+        "param_dtype": "torch.float32",
+        "train_seq_len": 512
+      },
+      "ts": 1766466394.271476
+    },
     "mps|train_runtime|cfg=fd3dc4d73378873a|seq=512": {
       "plan": {
         "amp_dtype": "torch.bfloat16",
@@ -93,6 +126,18 @@
       "iters": 2,
       "target_gbs": 8,
       "ts": 1766262567.662946,
+      "warmup": 1
+    },
+    "mps|train|v=2|cfg=b712294702d7e5b6|auto|amp=1|ampdt=torch.bfloat16": {
+      "by_seq": {
+        "512": [
+          8,
+          37
+        ]
+      },
+      "iters": 2,
+      "target_gbs": 0,
+      "ts": 1766466394.269739,
       "warmup": 1
     },
     "mps|train|v=2|cfg=fd3dc4d73378873a|auto|amp=1|ampdt=torch.bfloat16": {
