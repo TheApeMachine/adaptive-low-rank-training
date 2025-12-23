@@ -52,6 +52,10 @@ Save to `{@artifacts_path}/plan.md`.
 
 ---
 
+### [ ] Step: Implementation
+
+This section is the actionable implementation checklist. Each step is intended to be PR-sized, independently verifiable, and to preserve the decoupled additive-logit + causal/cache invariants.
+
 ## Implementation Plan (PR-sized slices)
 
 ### [ ] Step: Fix decoupled null `out_proj` duplication
@@ -126,8 +130,11 @@ Save to `{@artifacts_path}/plan.md`.
   - Compile out null logic when `HAS_NULL=False`.
 - **Correct math:** `s_null = dot(q_sem, k_sem_null) * SEM_SCALE + dot(q_geo, k_geo_null) * GEO_SCALE`.
 - **Correct seeding:** Initialize online-softmax state from null exactly once per decode step:
-  - Must work even when `L_prefix == 0`.
+  - Must work even when `L_prefix == 0` (i.e., empty quantized prefix; also covers `cache_len == 0`).
   - Must not duplicate null when the update kernel is launched multiple times across prefix blocks.
+- **Design detail (avoid multi-launch duplication):**
+  - Seed inside the 1-pass update kernel only when `start == 0` (runtime check) and `HAS_NULL=True`.
+  - Ensure the kernel is launched at least once with `start=0` even when `L_prefix==0` (so null-only output is correct), or alternatively seed `(m,d,o)` in Python before any kernel launches when `L_prefix==0`.
 - **Python plumbing:**
   - Remove fused decode guard that forbids `null_attn`.
   - Pass null tensors/flags into kernel launches.
@@ -145,10 +152,23 @@ Save to `{@artifacts_path}/plan.md`.
   - `d = sum_p d_part[p] * exp(m_part[p]-m) + exp(s_null - m)`
   - `o = sum_p o_part[p] * exp(m_part[p]-m) + v_null * exp(s_null - m)`
   - Keep all null work behind `HAS_NULL: tl.constexpr`.
+- **Critical design detail (how reduce obtains `s_null`):**
+  - Extend `kv_decode_reduce_partitions` to accept `q_sem_ptr`, `q_geo_ptr`, `k_sem_null_ptr`, `k_geo_null_ptr`, and `v_null_ptr` (plus required strides / `H`, `HD_*`, `SEM_SCALE`, `GEO_SCALE`) so it can compute `s_null` per `(B,H)` row inside the reduce kernel.
+  - This avoids requiring a separate precomputed `s_null` buffer and avoids coupling correctness to `pid_part==0`.
+  - Call the reduce kernel even when `P==0` (no partitions; typically `L_prefix==0`) so the null-only case is handled inside the same codepath.
 - **Acceptance:** Partitioned fused decode with `null_attn=True` matches streaming decode within tolerance.
 - **Verification:**
   - Extend parity tests to cover 2-pass mode.
-  - Include cases where `P > 0` and `P == 0`.
+  - Include cases where `L_prefix > 0` and `L_prefix == 0` (empty prefix / empty cache).
+
+### [ ] Step: Parity test matrix (explicit minimum coverage)
+
+- **Applies to:** Triton null integration steps (1-pass and 2-pass).
+- **Minimum functional coverage:**
+  - `HAS_NULL=False` and `HAS_NULL=True`.
+  - `L_prefix==0` (empty prefix / empty cache) and representative small+medium `L_prefix>0`.
+  - `B>1` and `H>1` to catch stride/indexing issues.
+  - If strides are supported for null tensors: contiguous and non-contiguous null tensors (otherwise enforce contiguous with clear runtime checks).
 
 ### [ ] Step: KV policy escape hatch in minimal CLI (`--kv-policy`)
 
@@ -157,6 +177,10 @@ Save to `{@artifacts_path}/plan.md`.
   - Add a single advanced flag `--kv-policy`.
   - If provided, parse with `KVCachePolicy.parse()` and treat as an atomic override over any derived/default KV flags.
 - **UX:** Improve `_MinimalParser.error()` to detect legacy KV flags (e.g. `--kv-cache-k-sem`) and print: `Use --kv-policy for a unified configuration.`
+- **UX implementation detail (argparse unknown flags):**
+  - Unknown flags are typically only available as a raw string in `ArgumentParser.error()`.
+  - Preferred approach: override parsing to use `parse_known_args()` and implement a controlled “unknown args” path that scans `unknown` for deprecated `--kv-cache-*` flags and prints the specific hint.
+  - Fallback approach (if keeping `error()` only): scan the incoming `argv` list for deprecated patterns before calling into argparse.
 - **Acceptance:** Minimal CLI remains intent-first while still allowing expert override.
 - **Verification:**
   - `make test`
@@ -164,12 +188,27 @@ Save to `{@artifacts_path}/plan.md`.
     - successful parsing
     - error hint for deprecated flags
 
+### [ ] Step: Audit and de-duplicate dead/overlapping KV policy infrastructure
+
+- **Files:** `production/model/policy.py`, `production/model/runtime.py` (plus any call sites discovered)
+- **Goal:** Reduce unused complexity without breaking live generation/tuning.
+- **Approach:**
+  - Audit references (`rg`) to confirm whether these modules participate in the active generation path vs being legacy/unused.
+  - If dead: remove or clearly deprecate, update imports/exports, and adjust tests.
+  - If partially used: consolidate with the active KV policy logic (likely in tuner + `production/model/gpt.py`) and eliminate duplication.
+- **Acceptance:**
+  - No behavior change in the supported paths.
+  - Clear single source of truth for runtime KV policy selection.
+- **Verification:** `make test` (and any existing runtime-tuning quality tests).
+
 ### [ ] Step: Update training run summaries (KV policy + null attention state)
 
 - **Files:** `production/runner_train_impl/summary.py`
+- **Define semantics:** training does not normally execute fused decode, so the summary should report *capability* (what this build/device could use at inference), not “path taken”.
 - **Add rows:**
   - `KV Policy`: short-string representation if known.
-  - `Null Attention`: `Inactive` / `Active (Unfused)` / `Active (Fused)`.
+  - `Null Attention`: `Inactive` / `Active (Unfused-only)` / `Active (Fused-capable)`.
+    - Source of truth should be a capability check (e.g., `TRITON_AVAILABLE`, device type, and fused eligibility predicates).
 - **Acceptance:** Summary reflects fused capability after Triton null integration.
 - **Verification:**
   - `make test`
