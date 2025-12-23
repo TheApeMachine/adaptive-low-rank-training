@@ -33,7 +33,7 @@ class TestTritonFusedNullParity(unittest.TestCase):
             rope=False,
             learned_temp=False,
             dropout=0.0,
-            null_attn=bool(null_attn),
+            null_attn=null_attn,
             tie_qk=True,
         )
 
@@ -76,7 +76,9 @@ class TestTritonFusedNullParity(unittest.TestCase):
             B = 2
             prefix_len = 96
             query_len = 1
-            max_seq = prefix_len + query_len + 2
+            EXTRA_PAD = 2
+            # Why: ensure we have a small safety buffer in the KV cache beyond the exact (prefix+query).
+            max_seq = prefix_len + query_len + EXTRA_PAD
             x = torch.randint(0, cfg.vocab_size, (B, prefix_len + query_len), device=torch.device("cuda"), dtype=torch.long)
 
             for fused in ("triton1pass", "triton2pass"):

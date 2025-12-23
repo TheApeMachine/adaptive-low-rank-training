@@ -154,19 +154,19 @@ class ModelConfig:
 
         self.train_long_seq_threshold = _opt_int(self.train_long_seq_threshold, default=None)
         if self.train_long_seq_threshold is not None:
-            self.train_long_seq_threshold = int(max(0, int(self.train_long_seq_threshold)))
+            self.train_long_seq_threshold = max(0, int(self.train_long_seq_threshold))
 
         self.train_long_seq_mem_block = _opt_int(self.train_long_seq_mem_block, default=None)
         if self.train_long_seq_mem_block is not None:
-            self.train_long_seq_mem_block = int(max(1, int(self.train_long_seq_mem_block)))
+            self.train_long_seq_mem_block = max(1, int(self.train_long_seq_mem_block))
 
         self.train_long_seq_local_window = _opt_int(self.train_long_seq_local_window, default=None)
         if self.train_long_seq_local_window is not None:
-            self.train_long_seq_local_window = int(max(0, int(self.train_long_seq_local_window)))
+            self.train_long_seq_local_window = max(0, int(self.train_long_seq_local_window))
 
         self.train_long_seq_q_chunk = _opt_int(self.train_long_seq_q_chunk, default=None)
         if self.train_long_seq_q_chunk is not None:
-            self.train_long_seq_q_chunk = int(max(1, int(self.train_long_seq_q_chunk)))
+            self.train_long_seq_q_chunk = max(1, int(self.train_long_seq_q_chunk))
 
         mem_sum = str(self.train_long_seq_mem_summarizer).strip().lower()
         if mem_sum == "conv":

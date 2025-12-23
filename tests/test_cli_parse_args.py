@@ -22,6 +22,7 @@ class TestCLIParseArgs(unittest.TestCase):
     def test_minimal_parse_accepts_kv_policy_override(self) -> None:
         args = parse_args(["--mode", "sample", "--ckpt", "runs/x/best.pt", "--kv-policy", "ksem=q4_0@32,kgeo=q8_0@32,v=q4_0@32,resid=128"])
         self.assertEqual(args.mode, "sample")
+        self.assertEqual(args.ckpt, "runs/x/best.pt")
         self.assertEqual(args.kv_policy, "ksem=q4_0@32,kgeo=q8_0@32,v=q4_0@32,resid=128")
 
     def test_deprecated_kv_flags_hint_kv_policy(self) -> None:

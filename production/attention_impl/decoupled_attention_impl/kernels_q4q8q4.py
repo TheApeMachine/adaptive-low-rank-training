@@ -103,11 +103,17 @@ if not TYPE_CHECKING and TRITON_AVAILABLE:
             b = pid // H
             h = pid - b * H
 
-            # Load running state.
-            m = tl.load(m_ptr + pid).to(tl.float32)
-            d = tl.load(d_ptr + pid).to(tl.float32)
             dv = tl.arange(0, HD_V)
-            o = tl.load(o_ptr + pid * stride_o + dv, mask=dv < HD_V, other=0.0).to(tl.float32)
+            # Load running state unless we're explicitly seeding from the null token.
+            # This makes the control flow unambiguous: either "use loaded state" or "initialize from null".
+            if HAS_NULL and SEED_NULL:
+                m = -float("inf")
+                d = 0.0
+                o = tl.zeros((HD_V,), dtype=tl.float32)
+            else:
+                m = tl.load(m_ptr + pid).to(tl.float32)
+                d = tl.load(d_ptr + pid).to(tl.float32)
+                o = tl.load(o_ptr + pid * stride_o + dv, mask=dv < HD_V, other=0.0).to(tl.float32)
 
             # Load query vectors.
             ds = tl.arange(0, HD_SEM)
@@ -124,25 +130,25 @@ if not TYPE_CHECKING and TRITON_AVAILABLE:
             ).to(tl.float32)
 
             if HAS_NULL and SEED_NULL:
-                    ksn = tl.load(
-                        k_sem_null_ptr + b * stride_ksn_b + h * stride_ksn_h + ds,
-                        mask=ds < HD_SEM,
-                        other=0.0,
-                    ).to(tl.float32)
-                    kgn = tl.load(
-                        k_geo_null_ptr + b * stride_kgn_b + h * stride_kgn_h + dg,
-                        mask=dg < HD_GEO,
-                        other=0.0,
-                    ).to(tl.float32)
-                    s_null = tl.sum(q_sem * ksn, axis=0) * SEM_SCALE + tl.sum(q_geo * kgn, axis=0) * GEO_SCALE
-                    vn = tl.load(
-                        v_null_ptr + b * stride_vn_b + h * stride_vn_h + dv,
-                        mask=dv < HD_V,
-                        other=0.0,
-                    ).to(tl.float32)
-                    m = s_null
-                    d = 1.0
-                    o = vn
+                ksn = tl.load(
+                    k_sem_null_ptr + b * stride_ksn_b + h * stride_ksn_h + ds,
+                    mask=ds < HD_SEM,
+                    other=0.0,
+                ).to(tl.float32)
+                kgn = tl.load(
+                    k_geo_null_ptr + b * stride_kgn_b + h * stride_kgn_h + dg,
+                    mask=dg < HD_GEO,
+                    other=0.0,
+                ).to(tl.float32)
+                s_null = tl.sum(q_sem * ksn, axis=0) * SEM_SCALE + tl.sum(q_geo * kgn, axis=0) * GEO_SCALE
+                vn = tl.load(
+                    v_null_ptr + b * stride_vn_b + h * stride_vn_h + dv,
+                    mask=dv < HD_V,
+                    other=0.0,
+                ).to(tl.float32)
+                m = s_null
+                d = 1.0
+                o = vn
 
             # Static loop: process NUM_SUBBLOCKS contiguous blocks of BLOCK_N tokens.
             for sb in tl.static_range(NUM_SUBBLOCKS):

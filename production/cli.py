@@ -9,32 +9,30 @@ import copy
 import math
 import sys
 from collections.abc import Callable
-from typing import NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, NoReturn, TypeVar, cast
 
 try:  # pragma: no cover
     import torch
-except Exception:  # pragma: no cover
-    torch = None
-
-# Python 3.12+ has `typing.override`; fall back to a no-op decorator.
-try:  # pragma: no cover
-    from typing import override
 except ImportError:  # pragma: no cover
-    try:
-        from typing_extensions import override
-    except ImportError:  # pragma: no cover
-        _F = TypeVar("_F", bound=Callable[..., object])
-
-        def override(f: _F) -> _F:
-            return f
+    torch = None
 
 from production.config import EXP_PRESETS, pick_device, set_seed
 try:  # pragma: no cover
     from production.optimizer import apply_dynamic_config
     from production.runner import run_single
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     apply_dynamic_config = None
     run_single = None
+
+# Python 3.12+ has `typing.override`; fall back to a no-op decorator.
+_F = TypeVar("_F", bound=Callable[..., object])
+if TYPE_CHECKING:  # pragma: no cover
+    from typing_extensions import override
+else:  # pragma: no cover
+
+    def override(f: _F, /) -> _F:
+        """No-op runtime decorator; real semantics are provided by type checkers only."""
+        return f
 
 
 class _MinimalParser(argparse.ArgumentParser):
@@ -150,6 +148,9 @@ def run(args: argparse.Namespace) -> int:
 
     if torch is None or apply_dynamic_config is None or run_single is None:
         raise RuntimeError("torch (and runtime deps) are required to run; install torch to use this CLI")
+    assert torch is not None
+    assert apply_dynamic_config is not None
+    assert run_single is not None
 
     device = pick_device(getattr(args, "device", None))
     set_seed(int(getattr(args, "seed", 1337)))
@@ -157,7 +158,7 @@ def run(args: argparse.Namespace) -> int:
     # Matmul precision hint (mostly impacts float32 matmuls).
     try:
         if hasattr(torch, "set_float32_matmul_precision"):
-            cast(object, torch).set_float32_matmul_precision(str(getattr(args, "matmul_precision", "high")))
+            torch.set_float32_matmul_precision(str(getattr(args, "matmul_precision", "high")))  # type: ignore[attr-defined]
     except (RuntimeError, ValueError, TypeError):
         pass
 
@@ -166,12 +167,12 @@ def run(args: argparse.Namespace) -> int:
         for exp in ["paper_baseline", "paper_bottleneck", "paper_decoupled", "paper_gqa"]:
             a2 = copy.deepcopy(args)
             a2.exp = exp
-            cast(object, apply_dynamic_config)(a2, device=device)
-            cast(object, run_single)(a2, device)
+            apply_dynamic_config(a2, device=device)
+            run_single(a2, device)
         return 0
 
-    cast(object, apply_dynamic_config)(args, device=device)
-    cast(object, run_single)(args, device)
+    apply_dynamic_config(args, device=device)
+    run_single(args, device)
     return 0
 
 

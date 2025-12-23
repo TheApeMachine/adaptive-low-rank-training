@@ -4,21 +4,20 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
-
-# Python 3.12+ has `typing.override`; fall back to a no-op decorator.
-try:  # pragma: no cover
-    from typing import override
-except ImportError:  # pragma: no cover
-    try:
-        from typing_extensions import override
-    except ImportError:  # pragma: no cover
-        _F = TypeVar("_F", bound=Callable[..., object])
-
-        def override(f: _F) -> _F:
-            return f
+from typing import TYPE_CHECKING, TypeVar
 
 from production.selfopt_cache import as_str_object_dict
+
+# Python 3.12+ has `typing.override`; fall back to a no-op decorator.
+_F = TypeVar("_F", bound=Callable[..., object])
+if TYPE_CHECKING:  # pragma: no cover
+    from typing_extensions import override
+else:  # pragma: no cover
+
+    def override(f: _F, /) -> _F:
+        """No-op runtime decorator; real semantics are provided by type checkers only."""
+        return f
+
 
 
 def _args_map(args: argparse.Namespace) -> dict[str, object]:
@@ -302,12 +301,16 @@ class TrainConfig(CommonRunConfig):
             mlp=_as_str(_get(d, "mlp", "swiglu"), "swiglu"),
             dropout=_as_float(_get(d, "dropout", 0.0), 0.0),
             diffusion_head=bool(_get(d, "diffusion_head", False)),
-            diffusion_head_num_train_timesteps=_as_int(_get(d, "diffusion_head_num_train_timesteps", 1000), 1000),
+            diffusion_head_num_train_timesteps=_as_int(
+                _get(d, "diffusion_head_num_train_timesteps", 1000), 1000
+            ),
             diffusion_head_num_infer_steps=_as_int(_get(d, "diffusion_head_num_infer_steps", 12), 12),
             diffusion_head_time_embed_dim=_as_int(_get(d, "diffusion_head_time_embed_dim", 128), 128),
             diffusion_head_mlp_mult=_as_int(_get(d, "diffusion_head_mlp_mult", 4), 4),
             diffusion_head_cfg_dropout_p=_as_float(_get(d, "diffusion_head_cfg_dropout_p", 0.10), 0.10),
-            diffusion_head_cfg_guidance_scale=_as_float(_get(d, "diffusion_head_cfg_guidance_scale", 1.5), 1.5),
+            diffusion_head_cfg_guidance_scale=_as_float(
+                _get(d, "diffusion_head_cfg_guidance_scale", 1.5), 1.5
+            ),
             diffusion_head_scheduler=_as_str(_get(d, "diffusion_head_scheduler", "ddim"), "ddim"),
             diffusion_head_loss_weight=_as_float(_get(d, "diffusion_head_loss_weight", 0.10), 0.10),
             steps=_as_int(_get(d, "steps", -1), -1),

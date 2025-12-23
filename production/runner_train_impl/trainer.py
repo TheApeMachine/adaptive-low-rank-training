@@ -609,11 +609,50 @@ class Trainer:
         cfg.learned_temp = (not bool(self.run_cfg.no_learned_temp))
 
         if self.self_opt is not None:
-            cfg.train_long_seq_enabled = bool(self.self_opt.train_long_seq_enabled)
-            cfg.train_long_seq_threshold = self.self_opt.train_long_seq_threshold
-            cfg.train_long_seq_mem_block = self.self_opt.train_long_seq_mem_block
-            cfg.train_long_seq_local_window = self.self_opt.train_long_seq_local_window
-            cfg.train_long_seq_q_chunk = self.self_opt.train_long_seq_q_chunk
+            def _coerce_opt_int(v: object, *, default: int | None, min_value: int) -> int | None:
+                if v is None:
+                    return default
+                if isinstance(v, bool):
+                    out = int(v)
+                elif isinstance(v, int):
+                    out = int(v)
+                elif isinstance(v, float):
+                    out = int(v)
+                elif isinstance(v, str):
+                    s = v.strip()
+                    if s == "":
+                        return default
+                    try:
+                        out = int(float(s))
+                    except ValueError:
+                        return default
+                else:
+                    return default
+                if out < int(min_value):
+                    return default
+                return out
+
+            cfg.train_long_seq_enabled = bool(getattr(self.self_opt, "train_long_seq_enabled", cfg.train_long_seq_enabled))
+            cfg.train_long_seq_threshold = _coerce_opt_int(
+                getattr(self.self_opt, "train_long_seq_threshold", cfg.train_long_seq_threshold),
+                default=cfg.train_long_seq_threshold,
+                min_value=0,
+            )
+            cfg.train_long_seq_mem_block = _coerce_opt_int(
+                getattr(self.self_opt, "train_long_seq_mem_block", cfg.train_long_seq_mem_block),
+                default=cfg.train_long_seq_mem_block,
+                min_value=1,
+            )
+            cfg.train_long_seq_local_window = _coerce_opt_int(
+                getattr(self.self_opt, "train_long_seq_local_window", cfg.train_long_seq_local_window),
+                default=cfg.train_long_seq_local_window,
+                min_value=0,
+            )
+            cfg.train_long_seq_q_chunk = _coerce_opt_int(
+                getattr(self.self_opt, "train_long_seq_q_chunk", cfg.train_long_seq_q_chunk),
+                default=cfg.train_long_seq_q_chunk,
+                min_value=1,
+            )
 
         # Optional diffusion head (adapter)
         cfg.diffusion_head = bool(self.run_cfg.diffusion_head)

@@ -100,11 +100,13 @@ def print_summary(*, args: object, device: object, cfg: object, n_total_tokens: 
 
         kv_policy_s = "-"
         kv_policy_raw = getattr(args, "kv_policy", None)
-        if kv_policy_raw is not None and str(kv_policy_raw).strip() != "":
+        if kv_policy_raw is not None and isinstance(kv_policy_raw, str) and kv_policy_raw.strip() != "":
             try:
-                kv_policy_s = KVCachePolicy.parse(str(kv_policy_raw)).short()
-            except (TypeError, ValueError):
-                kv_policy_s = str(kv_policy_raw)
+                kv_policy_s = KVCachePolicy.parse(kv_policy_raw).short()
+            except Exception as e:
+                kv_policy_s = kv_policy_raw
+                if _debug_enabled():
+                    kv_policy_s = f"{kv_policy_s} (parse_error={type(e).__name__})"
 
         null_enabled = bool(getattr(cfg, "null_attn", False))
         if not null_enabled:

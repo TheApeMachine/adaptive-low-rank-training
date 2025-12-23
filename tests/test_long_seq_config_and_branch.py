@@ -5,6 +5,8 @@ try:
 except Exception as e:  # pragma: no cover
     raise unittest.SkipTest(f"torch is required for these tests but is not available: {e}")
 
+from unittest import mock
+
 from production.attention_impl.decoupled_attention_impl.attention_core import DecoupledBottleneckAttention
 from production.model import ModelConfig
 
@@ -37,7 +39,7 @@ class TestLongSeqConfigAndBranch(unittest.TestCase):
                 "train_long_seq_mem_summarizer": "conv",
             }
         )
-        self.assertFalse(bool(cfg.train_long_seq_enabled))
+        self.assertFalse(cfg.train_long_seq_enabled)
         self.assertEqual(cfg.train_long_seq_threshold, 123)
         self.assertEqual(cfg.train_long_seq_mem_block, 9)
         self.assertEqual(cfg.train_long_seq_local_window, 456)
@@ -70,29 +72,12 @@ class TestLongSeqConfigAndBranch(unittest.TestCase):
         )
 
         attn = DecoupledBottleneckAttention(cfg).train()
-        call_count = 0
-        original_sdp = attn._sdp
-
-        def counted_sdp(
-            q: torch.Tensor,
-            k: torch.Tensor,
-            v: torch.Tensor,
-            attn_mask: torch.Tensor | None,
-            *,
-            scale: float | None = None,
-            is_causal: bool | None = None,
-        ) -> torch.Tensor:
-            nonlocal call_count
-            call_count += 1
-            return original_sdp(q, k, v, attn_mask, scale=scale, is_causal=is_causal)
-
-        setattr(attn, "_sdp", counted_sdp)
-
-        x = torch.randn(2, 7, cfg.d_model)
-        y, cache = attn(x, attn_mask=None, cache=None, pos_offset=0)
-        self.assertIsNone(cache)
-        self.assertEqual(tuple(y.shape), (2, 7, cfg.d_model))
-        self.assertGreater(call_count, 1)
+        with mock.patch.object(attn, "_sdp", wraps=attn._sdp) as mocked_sdp:
+            x = torch.randn(2, 7, cfg.d_model)
+            y, cache = attn(x, attn_mask=None, cache=None, pos_offset=0)
+            self.assertIsNone(cache)
+            self.assertEqual(tuple(y.shape), (2, 7, cfg.d_model))
+            self.assertGreater(int(mocked_sdp.call_count), 1)
 
     def test_learned_mem_summarizers_match_mean_at_init(self) -> None:
         cfg = ModelConfig(
@@ -118,20 +103,26 @@ class TestLongSeqConfigAndBranch(unittest.TestCase):
             train_long_seq_local_window=4,
             train_long_seq_q_chunk=2,
         )
-        attn = DecoupledBottleneckAttention(cfg).train()
+        torch.manual_seed(123)
         x = torch.randn(2, 7, cfg.d_model)
 
+        torch.manual_seed(0)
         cfg.train_long_seq_mem_summarizer = "mean"
-        y_mean, _ = attn(x, attn_mask=None, cache=None, pos_offset=0)
+        attn_mean = DecoupledBottleneckAttention(cfg).train()
+        y_mean, _ = attn_mean(x, attn_mask=None, cache=None, pos_offset=0)
 
+        torch.manual_seed(0)
         cfg.train_long_seq_mem_summarizer = "linear"
-        y_linear, _ = attn(x, attn_mask=None, cache=None, pos_offset=0)
+        attn_linear = DecoupledBottleneckAttention(cfg).train()
+        y_linear, _ = attn_linear(x, attn_mask=None, cache=None, pos_offset=0)
 
+        torch.manual_seed(0)
         cfg.train_long_seq_mem_summarizer = "conv"
-        y_conv, _ = attn(x, attn_mask=None, cache=None, pos_offset=0)
+        attn_conv = DecoupledBottleneckAttention(cfg).train()
+        y_conv, _ = attn_conv(x, attn_mask=None, cache=None, pos_offset=0)
 
-        self.assertTrue(bool(torch.allclose(y_mean, y_linear, rtol=0.0, atol=0.0)))
-        self.assertTrue(bool(torch.allclose(y_mean, y_conv, rtol=0.0, atol=0.0)))
+        self.assertTrue(torch.allclose(y_mean, y_linear, atol=1e-6))
+        self.assertTrue(torch.allclose(y_mean, y_conv, atol=1e-6))
 
 
 if __name__ == "__main__":

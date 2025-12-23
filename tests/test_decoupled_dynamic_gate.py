@@ -1,14 +1,20 @@
 import unittest
+from typing import cast
 
 try:
     import torch  # type: ignore
-except Exception as e:  # pragma: no cover
-    raise unittest.SkipTest(f"torch is required for these tests but is not available: {e}")
+except Exception:  # pragma: no cover
+    torch = None
+    SKIP_TORCH = True
+else:
+    SKIP_TORCH = False
 
-from production.attention_impl.decoupled_attention_impl.attention_core import DecoupledBottleneckAttention
-from production.model import ModelConfig
+if not SKIP_TORCH:
+    from production.attention_impl.decoupled_attention_impl.attention_core import DecoupledBottleneckAttention
+    from production.model import ModelConfig
 
 
+@unittest.skipIf(SKIP_TORCH, "torch is required for these tests")
 class TestDecoupledDynamicGate(unittest.TestCase):
     def _cfg(self) -> ModelConfig:
         return ModelConfig(
@@ -37,16 +43,17 @@ class TestDecoupledDynamicGate(unittest.TestCase):
         x = torch.randn(2, 5, attn.cfg.d_model, dtype=torch.float32)
         g = attn._decoupled_gate(x)
         self.assertIsNotNone(g)
-        self.assertTrue(bool(torch.allclose(g, g.new_full(g.shape, 0.5), rtol=0.0, atol=0.0)))
+        g_t = cast(torch.Tensor, g)
+        self.assertTrue(torch.allclose(g_t, g_t.new_full(g_t.shape, 0.5), rtol=0.0, atol=0.0))
 
     def test_gate_is_token_local(self) -> None:
         attn = DecoupledBottleneckAttention(self._cfg()).eval()
         proj = attn.decoupled_gate_proj
         self.assertIsNotNone(proj)
-        assert proj is not None
+        proj_t = cast(torch.nn.Linear, proj)
         with torch.no_grad():
-            proj.weight.zero_()
-            proj.weight[0, 0] = 1.0
+            proj_t.weight.zero_()
+            proj_t.weight[0, 0] = 1.0
 
         x1 = torch.zeros(1, 3, attn.cfg.d_model, dtype=torch.float32)
         x2 = x1.clone()
@@ -56,13 +63,14 @@ class TestDecoupledDynamicGate(unittest.TestCase):
         g2 = attn._decoupled_gate(x2)
         self.assertIsNotNone(g1)
         self.assertIsNotNone(g2)
-        assert g1 is not None
-        assert g2 is not None
+        g1_t = cast(torch.Tensor, g1)
+        g2_t = cast(torch.Tensor, g2)
 
-        self.assertTrue(bool(torch.allclose(g1[:, :, 0, :], g2[:, :, 0, :], rtol=0.0, atol=0.0)))
-        self.assertTrue(bool(torch.allclose(g1[:, :, 2, :], g2[:, :, 2, :], rtol=0.0, atol=0.0)))
-        self.assertFalse(bool(torch.allclose(g1[:, 0:1, 1, :], g2[:, 0:1, 1, :], rtol=0.0, atol=0.0)))
-        self.assertTrue(bool(torch.allclose(g1[:, 1:, 1, :], g2[:, 1:, 1, :], rtol=0.0, atol=0.0)))
+        # gate shape: [batch, heads, seq_len, features]
+        self.assertTrue(torch.allclose(g1_t[:, :, 0, :], g2_t[:, :, 0, :], rtol=0.0, atol=0.0))
+        self.assertTrue(torch.allclose(g1_t[:, :, 2, :], g2_t[:, :, 2, :], rtol=0.0, atol=0.0))
+        self.assertFalse(torch.allclose(g1_t[:, 0:1, 1, :], g2_t[:, 0:1, 1, :], rtol=0.0, atol=0.0))
+        self.assertTrue(torch.allclose(g1_t[:, 1:, 1, :], g2_t[:, 1:, 1, :], rtol=0.0, atol=0.0))
 
 
 if __name__ == "__main__":

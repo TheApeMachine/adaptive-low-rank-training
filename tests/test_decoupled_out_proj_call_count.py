@@ -5,6 +5,8 @@ try:
 except Exception as e:  # pragma: no cover
     raise unittest.SkipTest(f"torch is required for these tests but is not available: {e}")
 
+from unittest import mock
+
 from production.attention_impl.decoupled_attention_impl.attention_core import DecoupledBottleneckAttention
 from production.model import ModelConfig
 
@@ -31,21 +33,12 @@ class TestDecoupledOutProjCallCount(unittest.TestCase):
         )
         attn = DecoupledBottleneckAttention(cfg).eval()
 
-        call_count = 0
-        original_forward = attn.out_proj.forward
-
-        def counted_forward(inp: torch.Tensor) -> torch.Tensor:
-            nonlocal call_count
-            call_count += 1
-            return original_forward(inp)
-
-        setattr(attn.out_proj, "forward", counted_forward)
-
-        x = torch.randn(2, 7, cfg.d_model)
-        y, cache = attn(x, attn_mask=None, cache=None, pos_offset=0)
-        self.assertIsNone(cache)
-        self.assertEqual(call_count, 1)
-        self.assertEqual(tuple(y.shape), (2, 7, cfg.d_model))
+        with mock.patch.object(attn.out_proj, "forward", wraps=attn.out_proj.forward) as mocked_forward:
+            x = torch.randn(2, 7, cfg.d_model)
+            y, cache = attn(x, attn_mask=None, cache=None, pos_offset=0)
+            self.assertIsNone(cache)
+            self.assertEqual(int(mocked_forward.call_count), 1)
+            self.assertEqual(tuple(y.shape), (2, 7, cfg.d_model))
 
 
 if __name__ == "__main__":

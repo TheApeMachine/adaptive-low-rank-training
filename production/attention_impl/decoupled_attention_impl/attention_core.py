@@ -257,7 +257,7 @@ class DecoupledBottleneckAttention(nn.Module):
                     self.decoupled_gate_logit = nn.Parameter(torch.zeros(n_head))
                     if bool(cfg.decoupled_gate_dynamic):
                         self.decoupled_gate_proj = nn.Linear(cfg.d_model, n_head, bias=False)
-                        nn.init.zeros_(self.decoupled_gate_proj.weight)
+                        _ = nn.init.zeros_(self.decoupled_gate_proj.weight)
 
                 sem_head_dim = int(self.sem_head_dim)
                 v_head_dim = int(self.v_head_dim)
@@ -526,7 +526,12 @@ class DecoupledBottleneckAttention(nn.Module):
             kgn = self._shape(cast(torch.Tensor, self.k_geo_null).expand(B, 1, -1), geo_head_dim)[:, :, 0, :].contiguous().to(torch.float16)
             vn = self._shape(cast(torch.Tensor, self.v_null).expand(B, 1, -1), v_head_dim)[:, :, 0, :].contiguous().to(torch.float16)
         else:
-            ksn = kgn = vn = q_sem2
+            # Kernel signature always includes null placeholders. When null-attn is disabled we pass
+            # zero tensors of the correct shape/dtype/device and rely on HAS_NULL=False to ensure
+            # they are never used in computation.
+            ksn = q_sem2.new_zeros((B, H, sem_head_dim))
+            kgn = q_geo2.new_zeros((B, H, geo_head_dim))
+            vn = q_sem2.new_zeros((B, H, v_head_dim))
 
         BH = B * H
         m = torch.full((BH,), -float("inf"), device=q_sem.device, dtype=torch.float32)
@@ -1343,7 +1348,11 @@ class DecoupledBottleneckAttention(nn.Module):
 
                             q_cat_full = torch.cat([qsh * sem_scale, qgh * geo_scale], dim=-1)
 
-                            mem_summarizer = str(cfg.train_long_seq_mem_summarizer).strip().lower()
+                            mem_sum_raw = cast(object | None, getattr(cfg, "train_long_seq_mem_summarizer", None))
+                            if mem_sum_raw is None:
+                                mem_summarizer = "mean"
+                            else:
+                                mem_summarizer = str(mem_sum_raw).strip().lower()
                             if mem_summarizer == "conv" and dev != "cuda":
                                 mem_summarizer = "linear"
                             if mem_summarizer not in ("mean", "linear", "conv"):
