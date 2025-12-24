@@ -3,6 +3,7 @@ llama_loader provides weight-loading utilities for Llama-style checkpoints.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
@@ -14,16 +15,15 @@ from caramba.weight.attention_llama import LlamaAttentionWeight
 
 def load_torch_state_dict(path: Path) -> dict[str, Tensor]:
     """
-    load_torch_state_dict loads a torch state_dict saved via torch.save().
+    load_torch_state_dict loads a state_dict from torch or safetensors files.
     """
+    path = Path(path)
+    if path.name.endswith(".index.json"):
+        return _load_index_state_dict(path)
+    if path.suffix == ".safetensors":
+        return _load_safetensors(path)
     obj = torch.load(path, map_location="cpu")
-    if not isinstance(obj, dict):
-        raise ValueError(f"Expected dict state_dict, got {type(obj)!r}")
-    if not all(isinstance(k, str) for k in obj.keys()):
-        raise ValueError("Expected state_dict with string keys")
-    if not all(isinstance(v, torch.Tensor) for v in obj.values()):
-        raise ValueError("Expected state_dict with Tensor values")
-    return obj
+    return _ensure_state_dict(obj)
 
 
 def load_state_dict_mapped(
@@ -34,7 +34,8 @@ def load_state_dict_mapped(
     strict: bool = True,
 ) -> None:
     """
-    load_state_dict_mapped loads a state_dict into a model using an explicit key mapping.
+    load_state_dict_mapped loads a state_dict into a model using an explicit
+    key mapping.
     """
     if not mapping:
         raise ValueError("mapping must be non-empty")
@@ -53,13 +54,56 @@ def load_state_dict_mapped(
         )
 
 
+def _load_index_state_dict(index_path: Path) -> dict[str, Tensor]:
+    data = json.loads(index_path.read_text(encoding="utf-8"))
+    weight_map = data.get("weight_map")
+    if not isinstance(weight_map, dict):
+        raise ValueError("Invalid index file: missing weight_map")
+    shards = sorted({str(v) for v in weight_map.values()})
+
+    out: dict[str, Tensor] = {}
+    for shard in shards:
+        shard_path = index_path.parent / shard
+        if not shard_path.is_file():
+            raise ValueError(f"Shard file not found: {shard_path}")
+        shard_state = load_torch_state_dict(shard_path)
+        for key, value in shard_state.items():
+            if key in out:
+                raise ValueError(f"Duplicate key in shards: {key}")
+            out[key] = value
+    return out
+
+
+def _load_safetensors(path: Path) -> dict[str, Tensor]:
+    try:
+        from safetensors.torch import load_file
+    except ImportError as exc:
+        raise ImportError(
+            "safetensors is required for .safetensors checkpoints. "
+            "Install it with `pip install safetensors`."
+        ) from exc
+    state = load_file(str(path), device="cpu")
+    return _ensure_state_dict(state)
+
+
+def _ensure_state_dict(obj: object) -> dict[str, Tensor]:
+    if not isinstance(obj, dict):
+        raise ValueError(f"Expected dict state_dict, got {type(obj)!r}")
+    if not all(isinstance(k, str) for k in obj.keys()):
+        raise ValueError("Expected state_dict with string keys")
+    if not all(isinstance(v, torch.Tensor) for v in obj.values()):
+        raise ValueError("Expected state_dict with Tensor values")
+    return obj
+
+
 def init_decoupled_from_llama_attention(
     *,
     student: DecoupledAttentionWeight,
     teacher: LlamaAttentionWeight,
 ) -> None:
     """
-    init_decoupled_from_llama_attention initializes DBA weights from teacher attention.
+    init_decoupled_from_llama_attention initializes DBA weights from teacher
+    attention.
     """
     init_decoupled_from_qkvo(
         student=student,
@@ -87,7 +131,8 @@ def init_decoupled_from_qkvo(
     teacher_o_bias: Tensor | None = None,
 ) -> None:
     """
-    init_decoupled_from_qkvo initializes decoupled attention weights from teacher Q/K/V/O.
+    init_decoupled_from_qkvo initializes decoupled attention weights from
+    teacher Q/K/V/O.
 
     This supports only truncation/splitting when the student's per-head combined
     Q/K dimension does not exceed the teacher's head_dim.
@@ -116,7 +161,11 @@ def init_decoupled_from_qkvo(
         geo_h=geo_h,
     )
 
-    k_w = teacher_k.view(int(student.n_kv_heads), head_dim, int(student.d_model))
+    k_w = teacher_k.view(
+        int(student.n_kv_heads),
+        head_dim,
+        int(student.d_model),
+    )
     k_b = _view_bias(teacher_k_bias, int(student.n_kv_heads), head_dim)
     _init_split(
         out_sem=student.k_sem,
@@ -140,7 +189,9 @@ def _copy_dense(dst: nn.Module, w: Tensor, b: Tensor | None) -> None:
         )
     dst_w: Tensor = getattr(dst, "weight")
     if dst_w.shape != w.shape:
-        raise ValueError(f"Weight shape mismatch: dst={dst_w.shape}, src={w.shape}")
+        raise ValueError(
+            f"Weight shape mismatch: dst={dst_w.shape}, src={w.shape}"
+        )
     dst_w.data.copy_(w)
 
     dst_b = getattr(dst, "bias", None)
@@ -152,7 +203,9 @@ def _copy_dense(dst: nn.Module, w: Tensor, b: Tensor | None) -> None:
         if not isinstance(dst_b, torch.Tensor):
             raise ValueError(f"Expected tensor bias, got {type(dst_b)!r}")
         if dst_b.shape != b.shape:
-            raise ValueError(f"Bias shape mismatch: dst={dst_b.shape}, src={b.shape}")
+            raise ValueError(
+                f"Bias shape mismatch: dst={dst_b.shape}, src={b.shape}"
+            )
         dst_b.data.copy_(b)
 
 
@@ -185,24 +238,35 @@ def _init_split(
 
     # teacher_w: (H, head_dim, d_model)
     w_sem_src = teacher_w[:, : int(sem_h), :].reshape_as(w_sem)
-    w_geo_src = teacher_w[:, int(sem_h) : int(sem_h + geo_h), :].reshape_as(w_geo)
+    w_geo_src = teacher_w[
+        :,
+        int(sem_h) : int(sem_h + geo_h),
+        :,
+    ].reshape_as(w_geo)
 
     w_sem.data.copy_(w_sem_src)
     w_geo.data.copy_(w_geo_src)
 
     b_sem = getattr(out_sem, "bias", None)
     b_geo = getattr(out_geo, "bias", None)
-    if (b_sem is None) != (teacher_b is None) or (b_geo is None) != (teacher_b is None):
+    if (
+        (b_sem is None) != (teacher_b is None)
+        or (b_geo is None) != (teacher_b is None)
+    ):
         raise ValueError("Bias presence mismatch between student and teacher")
     if teacher_b is not None:
         if b_sem is None or b_geo is None:
             raise ValueError("Expected student biases to be present")
-        if not isinstance(b_sem, torch.Tensor) or not isinstance(b_geo, torch.Tensor):
+        if not isinstance(b_sem, torch.Tensor) or not isinstance(
+            b_geo,
+            torch.Tensor,
+        ):
             raise ValueError("Expected tensor student biases")
 
         b_sem_src = teacher_b[:, : int(sem_h)].reshape_as(b_sem)
-        b_geo_src = teacher_b[:, int(sem_h) : int(sem_h + geo_h)].reshape_as(b_geo)
+        b_geo_src = teacher_b[
+            :,
+            int(sem_h) : int(sem_h + geo_h),
+        ].reshape_as(b_geo)
         b_sem.data.copy_(b_sem_src)
         b_geo.data.copy_(b_geo_src)
-
-

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 from caramba.config.mode import Mode
+from caramba.config.train import TrainConfig
 
 
 class Run(BaseModel):
@@ -17,3 +18,4 @@ class Run(BaseModel):
     seed: int
     steps: int
     expected: dict[str, object]
+    train: TrainConfig | None = None

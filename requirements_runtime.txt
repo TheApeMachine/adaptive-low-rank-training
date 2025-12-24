@@ -8,5 +8,5 @@ rich
 h5py
 wandb
 PyYAML
-
-
+huggingface_hub
+safetensors

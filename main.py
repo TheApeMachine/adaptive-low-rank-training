@@ -22,7 +22,6 @@ with new ideas.
 from __future__ import annotations
 
 from caramba.cli import CLI
-from caramba.config.mode import Mode
 from caramba.trainer import Trainer
 
 
@@ -32,13 +31,6 @@ def main(argv: list[str] | None = None) -> None:
     """
     intent = CLI().parse(argv)
 
-    for group in intent.groups:
-        for run in group.runs:
-            match run.mode:
-                case Mode.TRAIN:
-                    Trainer(
-                        manifest=intent,
-                    ).run()
-                case _:
-                    raise ValueError(f"Invalid mode: {run.mode}")
-
+    if not intent.groups:
+        raise ValueError("Manifest has no groups to run.")
+    Trainer(manifest=intent).run()

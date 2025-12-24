@@ -19,7 +19,7 @@ fineweb_100m.npy
 fineweb_100m.npy.meta
 .DS_Store
 .DS_Store
-*.npy
+fineweb_1b.npy
 *.meta
 critiques.md
 .DS_Store

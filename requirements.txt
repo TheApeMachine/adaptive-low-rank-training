@@ -10,3 +10,5 @@ h5py
 wandb
 pydantic
 PyYAML
+huggingface_hub
+safetensors

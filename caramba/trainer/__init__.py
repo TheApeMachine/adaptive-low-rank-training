@@ -7,5 +7,6 @@ from caramba.config.manifest import Manifest
 from caramba.trainer.blockwise import BlockwiseTrainer
 from caramba.trainer.distill import DistillLoss
 from caramba.trainer.trainer import Trainer
+from caramba.trainer.upcycle import Upcycle
 
-__all__ = ["BlockwiseTrainer", "DistillLoss", "Trainer"]
+__all__ = ["BlockwiseTrainer", "DistillLoss", "Trainer", "Upcycle"]
