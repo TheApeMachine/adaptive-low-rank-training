@@ -2,7 +2,7 @@
 
 Verification runs after training to catch failures before expensive
 benchmarking. It compares teacher and student outputs, runs behavioral
-evaluations, or analyzes KV-cache memory usage.
+evaluations, checks loss-based fidelity, or analyzes KV-cache memory usage.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from caramba.config import PositiveFloat, PositiveInt
+from caramba.config import NonNegativeFloat, PositiveFloat, PositiveInt
 from caramba.config.eval import EvalVerifyConfig
 from caramba.config.kvcache import KVCachePolicyConfig, KVCachePolicyDecoupledConfig
 
@@ -68,9 +68,34 @@ class KVCacheVerifyConfig(BaseModel):
     min_reduction_ratio: PositiveFloat | None = None
 
 
+class FidelityVerifyConfig(BaseModel):
+    """Short-context quality gate based on loss deltas.
+
+    We run teacher and student on identical short-context batches and compare
+    per-token negative log-likelihood (NLL). This is cheap, stable, and a
+    strong indicator of quality regression.
+    """
+
+    type: Literal["fidelity"] = "fidelity"
+    batches: PositiveInt
+    block_size: PositiveInt | None = None
+    batch_size: PositiveInt | None = None
+    split: Literal["auto", "train", "val"] = "auto"
+    max_delta_nll: NonNegativeFloat | None = None
+    max_ppl_ratio: PositiveFloat | None = None
+    fail_fast: bool = False
+
+    @model_validator(mode="after")
+    def _require_at_least_one_threshold(self) -> "FidelityVerifyConfig":
+        """Ensure at least one acceptance threshold is configured."""
+        if self.max_delta_nll is None and self.max_ppl_ratio is None:
+            raise ValueError("fidelity verify requires at least one of: max_delta_nll, max_ppl_ratio")
+        return self
+
+
 # Union type for all verification configs, using Pydantic's discriminator
 # pattern for automatic deserialization from YAML.
 VerifyConfig = Annotated[
-    CompareVerifyConfig | EvalVerifyConfig | KVCacheVerifyConfig,
+    CompareVerifyConfig | EvalVerifyConfig | KVCacheVerifyConfig | FidelityVerifyConfig,
     Field(discriminator="type"),
 ]

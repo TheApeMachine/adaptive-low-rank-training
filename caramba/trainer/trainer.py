@@ -55,5 +55,6 @@ class Trainer:
                         manifest=self.manifest,
                         group=group,
                         train=run.train,
+                        defaults=self.manifest.defaults,
                     )
                 session.run(run)

@@ -20,6 +20,7 @@ from torch import Tensor, nn
 from caramba.cache.decoupled import DecoupledLayerKVCache
 from caramba.cache.layer import LayerKVCache
 from caramba.config.kvcache import KVCacheKind
+from caramba.infer.cache_policy import choose_cache_kind
 from caramba.infer.context import InferContext
 from caramba.infer.generate import (
     GenerateConfig,
@@ -48,15 +49,22 @@ class SpeculativeConfig:
     spec_method: str = "reject_sampling"
     spec_extra_token: bool = True
     spec_disable_below_accept: float = 0.0
+    spec_k_adaptive: bool = False
+    spec_k_min: int = 1
+    spec_k_max: int = 16
+    spec_k_target_accept: float = 0.7
+    spec_k_adjust_interval: int = 32
+    spec_k_step: int = 1
     max_new_tokens: int = 64
     temperature: float = 1.0
     top_k: int | None = None
     top_p: float | None = None
     eos_token_id: int | None = None
     max_seq_len: int = 2048
-    cache_kind: KVCacheKind = KVCacheKind.FP16
+    cache_kind: KVCacheKind | str = KVCacheKind.FP16
     cache_qblock: int = 32
     cache_residual_len: int = 0
+    cache_budget_mb: float | None = None
 
 
 def sampling_probs(
@@ -207,6 +215,8 @@ class SpeculativeGenerator:
 
         self._accept_total: int = 0
         self._propose_total: int = 0
+        self._spec_k_current: int = int(self.config.spec_k)
+        self._last_k_adjust_at: int = 0
 
     def reset(self) -> None:
         """Clear caches and stats."""
@@ -217,6 +227,44 @@ class SpeculativeGenerator:
         self._pos = 0
         self._accept_total = 0
         self._propose_total = 0
+        self._spec_k_current = int(self.config.spec_k)
+        self._last_k_adjust_at = 0
+
+    def _maybe_adjust_spec_k(self) -> None:
+        """Adapt spec_k based on observed acceptance rate.
+
+        Why this exists:
+        - Higher spec_k increases throughput when acceptance is high.
+        - Lower spec_k avoids wasted work when the draft model is diverging.
+        """
+
+        cfg = self.config
+        if not bool(getattr(cfg, "spec_k_adaptive", False)):
+            return
+        interval = max(1, int(getattr(cfg, "spec_k_adjust_interval", 32)))
+        if self._propose_total < interval:
+            return
+        if (self._propose_total - self._last_k_adjust_at) < interval:
+            return
+
+        target = float(getattr(cfg, "spec_k_target_accept", 0.7))
+        step = max(1, int(getattr(cfg, "spec_k_step", 1)))
+        k_min = max(1, int(getattr(cfg, "spec_k_min", 1)))
+        k_max = max(k_min, int(getattr(cfg, "spec_k_max", 16)))
+        r = float(self.acceptance_rate)
+
+        # Deadband to avoid oscillation.
+        hi = min(0.99, target + 0.1)
+        lo = max(0.0, target - 0.1)
+
+        k = int(self._spec_k_current)
+        if r >= hi:
+            k = min(k_max, k + step)
+        elif r <= lo:
+            k = max(k_min, k - step)
+
+        self._spec_k_current = int(k)
+        self._last_k_adjust_at = int(self._propose_total)
 
     @property
     def acceptance_rate(self) -> float:
@@ -230,12 +278,26 @@ class SpeculativeGenerator:
         if self._target_caches is not None:
             return
 
+        ck = self.config.cache_kind
+        if isinstance(ck, str) and ck.strip().lower() == "auto":
+            choice = choose_cache_kind(
+                model=self.target_model,
+                batch_size=int(batch_size),
+                max_seq_len=int(self.config.max_seq_len),
+                qblock=int(self.config.cache_qblock),
+                residual_len=int(self.config.cache_residual_len),
+                budget_mb=self.config.cache_budget_mb,
+            )
+            cache_kind = choice.kind
+        else:
+            cache_kind = ck if isinstance(ck, KVCacheKind) else KVCacheKind.FP16
+
         self._target_caches = create_caches(
             self.target_model,
             batch_size=batch_size,
             max_seq_len=self.config.max_seq_len,
             device=self.device,
-            cache_kind=self.config.cache_kind,
+            cache_kind=cache_kind,
             cache_qblock=self.config.cache_qblock,
             cache_residual_len=self.config.cache_residual_len,
         )
@@ -244,7 +306,7 @@ class SpeculativeGenerator:
             batch_size=batch_size,
             max_seq_len=self.config.max_seq_len,
             device=self.device,
-            cache_kind=self.config.cache_kind,
+            cache_kind=cache_kind,
             cache_qblock=self.config.cache_qblock,
             cache_residual_len=self.config.cache_residual_len,
         )
@@ -384,7 +446,7 @@ class SpeculativeGenerator:
                 self._pos += 1
                 continue
 
-            k = min(cfg.spec_k, remaining - 1)
+            k = min(int(self._spec_k_current), remaining - 1)
             k = max(1, k)
 
             target_pos_before = (
@@ -435,6 +497,7 @@ class SpeculativeGenerator:
 
             self._accept_total += accepted_k
             self._propose_total += k
+            self._maybe_adjust_spec_k()
 
             if accepted_k > 0:
                 generated[:, gen_len : gen_len + accepted_k] = proposed_t[:, :accepted_k]

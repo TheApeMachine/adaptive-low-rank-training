@@ -30,10 +30,19 @@ class InferContext:
     caches: list[LayerKVCache | DecoupledLayerKVCache]
     pos_offset: int = 0
     attn_mask: "Tensor | None" = None
+    q_chunk: int | None = None
+    local_window: int | None = None
 
     _index: int = 0
 
-    def begin(self, *, pos_offset: int, attn_mask: "Tensor | None" = None) -> None:
+    def begin(
+        self,
+        *,
+        pos_offset: int,
+        attn_mask: "Tensor | None" = None,
+        q_chunk: int | None = None,
+        local_window: int | None = None,
+    ) -> None:
         """Reset for a new forward pass.
 
         Called before each forward to set the position offset and reset
@@ -42,6 +51,8 @@ class InferContext:
         self._index = 0
         self.pos_offset = int(pos_offset)
         self.attn_mask = attn_mask
+        self.q_chunk = q_chunk
+        self.local_window = local_window
 
     def next_cache(self) -> LayerKVCache | DecoupledLayerKVCache:
         """Get the next cache in traversal order.

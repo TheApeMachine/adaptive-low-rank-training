@@ -11,7 +11,13 @@ import enum
 
 from pydantic import BaseModel
 
-from caramba.config import NonNegativeInt, PositiveFloat, PositiveInt
+from caramba.config import (
+    NonNegativeFloat,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
+    Probability,
+)
 
 
 class TrainPhase(str, enum.Enum):
@@ -42,6 +48,11 @@ class TrainConfig(BaseModel):
     device: str = "cpu"
     dtype: str = "float32"
 
+    # Auto batch sizing: optionally scale batch size inversely with block_size.
+    auto_batch_size: bool = False
+    auto_batch_ref_block_size: PositiveInt = 512
+    auto_batch_min: PositiveInt = 1
+
     # Teacher model settings
     teacher_ckpt: str | None = None
     teacher_rope_base: PositiveFloat | None = None
@@ -60,4 +71,15 @@ class TrainConfig(BaseModel):
     gradient_accumulation_steps: PositiveInt = 1
     num_workers: NonNegativeInt = 0
     pin_memory: bool = False
-    compile_model: bool = False
+    compile_model: bool | str = False
+    compile_mode: str = "reduce-overhead"
+
+    # Activation checkpointing: controls when we recompute activations instead
+    # of storing them to reduce peak memory usage on long sequences.
+    activation_checkpointing: bool = False
+    activation_checkpoint_threshold_mb: NonNegativeFloat = 0.0
+
+    # LR scheduler (optional).
+    scheduler: str = "none"  # none|linear|cosine|constant
+    warmup_steps: NonNegativeInt = 0
+    min_lr_ratio: Probability = 0.0

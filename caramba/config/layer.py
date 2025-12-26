@@ -128,6 +128,19 @@ class AttentionLayerConfig(Config):
     bias: bool = False
     learned_temp: bool = False
 
+    # Long-sequence performance knobs (optional).
+    # q_chunk: compute attention in chunks over the query length to reduce peak memory.
+    # local_window: restrict attention to a fixed window around each query position.
+    q_chunk: PositiveInt | None = None
+    local_window: PositiveInt | None = None
+
+    # Memory summarization: optional compression of the far past.
+    # When mem_block is set, we summarize the prefix (everything before the local_window)
+    # into one token per block of size mem_block. The method controls how the block is summarized.
+    mem_block: PositiveInt | None = None
+    mem_summarize: Literal["mean", "linear", "conv"] = "mean"
+    mem_activation_threshold: PositiveInt | None = None
+
     @property
     def head_dim(self) -> int:
         """Compute head dimension from total attention dimension."""

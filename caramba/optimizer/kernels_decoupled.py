@@ -312,12 +312,11 @@ if not TYPE_CHECKING and TRITON_AVAILABLE:
                 ks_byte = ksd // 2
                 ks_nib = ksd % 2
                 ks_ptr = k_sem_q_ptr + b * stride_ksq_b + t[:, None] * stride_ksq_t + ks_byte[None, :]
-                # Load as int32 for consistency with the single-pass variant
-                ks_p = tl.load(ks_ptr, mask=tm[:, None] & (ds[None, :] < HD_SEM), other=0).to(tl.int32)
+                ks_p = tl.load(ks_ptr, mask=tm[:, None] & (ds[None, :] < HD_SEM), other=0).to(tl.uint8)
                 ks_hi = ks_p >> 4
                 ks_lo = ks_p & 0xF
                 ks_u = tl.where(ks_nib[None, :] == 0, ks_hi, ks_lo)
-                ks_q = ks_u - 8  # Already int32
+                ks_q = ks_u.to(tl.int32) - 8
 
                 ks_sb = ksd // QBLOCK_SEM
                 ks_s_ptr = k_sem_s_ptr + b * stride_kss_b + t[:, None] * stride_kss_t + ks_sb[None, :] * stride_kss_c

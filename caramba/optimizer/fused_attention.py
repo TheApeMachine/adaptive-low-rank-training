@@ -64,6 +64,43 @@ def fused_decode_available(cache: "DecoupledLayerKVCache", device_type: str) -> 
     return True
 
 
+def _tune_launch_params(
+    *,
+    decode_block: int,
+    sem_head_dim: int,
+    geo_head_dim: int,
+    v_head_dim: int,
+    cache_len: int,
+) -> tuple[int, int]:
+    """Pick conservative Triton launch params for decoupled decode kernels.
+
+    Why this exists:
+    - Launch params (num_warps/num_stages) heavily influence throughput.
+    - We want a simple heuristic that works reasonably across common head sizes
+      without requiring a full autotuner.
+    """
+
+    d_total = int(sem_head_dim) + int(geo_head_dim) + int(v_head_dim)
+    L = int(cache_len)
+    db = int(decode_block)
+
+    # Warps: more work per threadblock → more warps. Keep conservative defaults.
+    if d_total >= 256:
+        num_warps = 8
+    elif d_total >= 128:
+        num_warps = 4
+    else:
+        num_warps = 2
+
+    # Stages: deeper pipelines help longer prefixes and larger blocks.
+    if L >= 4096 or db >= 2048:
+        num_stages = 3
+    else:
+        num_stages = 2
+
+    return int(num_warps), int(num_stages)
+
+
 def decoupled_scores_f32(
     *,
     q_sem: torch.Tensor,
@@ -201,8 +238,13 @@ def fused_decode_decoupled_q4q8q4(
         block_n = 128
         num_sub = max(1, int(decode_block // block_n))
         step = block_n * num_sub
-        num_warps = 4
-        num_stages = 2
+        num_warps, num_stages = _tune_launch_params(
+            decode_block=int(decode_block),
+            sem_head_dim=int(sem_head_dim),
+            geo_head_dim=int(geo_head_dim),
+            v_head_dim=int(v_head_dim),
+            cache_len=int(cache_len),
+        )
 
         ksq_ = cache.k_sem.q
         kss_ = cache.k_sem.s
@@ -416,6 +458,13 @@ def fused_decode_decoupled_q4q8q4_2pass(
 
         grid1 = (BH, P)
         launch_part = kernel_part.__getitem__(grid1)
+        num_warps, num_stages = _tune_launch_params(
+            decode_block=int(decode_block),
+            sem_head_dim=int(sem_head_dim),
+            geo_head_dim=int(geo_head_dim),
+            v_head_dim=int(v_head_dim),
+            cache_len=int(cache_len),
+        )
         _ = launch_part(
             q_sem2,
             q_geo2,
@@ -467,8 +516,8 @@ def fused_decode_decoupled_q4q8q4_2pass(
             stride_dp_part=d_part.stride(1),
             stride_op_row=o_part.stride(0),
             stride_op_part=o_part.stride(1),
-            num_warps=4,
-            num_stages=2,
+            num_warps=int(num_warps),
+            num_stages=int(num_stages),
         )
 
     # Pass 2: Reduce partitions

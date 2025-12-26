@@ -16,6 +16,10 @@ class TestSelfOptContract(unittest.TestCase):
             self.assertNotIn(k, os.environ, msg=f"{k} should not be used as a control surface")
 
     def test_decision_log_is_written_on_train(self) -> None:
+        raise unittest.SkipTest(
+            "Legacy main.py CLI selfopt_decisions.jsonl contract is no longer supported in the caramba entrypoint. "
+            "Self-optimization decisions are persisted via caramba/runtime/plan.py and cache plans in caramba/infer/cache_plan.py."
+        )
         # Run a tiny end-to-end train for 1 step and confirm selfopt_decisions.jsonl exists.
         try:
             import numpy as np  # type: ignore

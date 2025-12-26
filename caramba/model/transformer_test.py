@@ -55,3 +55,19 @@ class TransformerTest(unittest.TestCase):
 
         x: torch.Tensor = torch.randn(1, 10, 128)
         self.assertEqual(transformer(x).shape, (1, 10, 128))
+
+    def test_forward_with_activation_checkpointing(self) -> None:
+        """Forward works when activation checkpointing is enabled on the topology."""
+        layers: list[NodeConfig] = [
+            LinearLayerConfig(type=LayerType.LINEAR, d_in=32, d_out=32, bias=True),
+            AttentionLayerConfig(type=LayerType.ATTENTION, d_model=32, n_heads=4, dropout_p=0.0),
+        ]
+        transformer = TransformerModel(StackedTopologyConfig(layers=layers))
+        # Topology is a StackedTopology; enable checkpointing.
+        topo = transformer.topology
+        if hasattr(topo, "activation_checkpointing"):
+            setattr(topo, "activation_checkpointing", True)
+            setattr(topo, "activation_checkpoint_threshold_mb", 0.0)
+        x = torch.randn(1, 8, 32, requires_grad=True)
+        y = transformer(x)
+        self.assertEqual(y.shape, (1, 8, 32))

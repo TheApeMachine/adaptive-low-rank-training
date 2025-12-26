@@ -68,7 +68,7 @@ class ExperimentRunner:
         train_config = self._get_train_config(group)
 
         # Run upcycle training
-        upcycle = Upcycle(self.manifest, group, train_config)
+        upcycle = Upcycle(self.manifest, group, train_config, defaults=self.manifest.defaults)
 
         for i, run in enumerate(group.runs):
             phase_name = run.train.phase.value if run.train else "unknown"

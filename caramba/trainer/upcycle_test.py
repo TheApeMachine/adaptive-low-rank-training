@@ -36,6 +36,12 @@ class MockTrainConfig:
     num_workers: int
     pin_memory: bool
     compile_model: bool
+    compile_mode: str
+    auto_batch_size: bool
+    auto_batch_ref_block_size: int
+    auto_batch_min: int
+    activation_checkpointing: bool
+    activation_checkpoint_threshold_mb: float
 
     def __init__(self, **kwargs: object) -> None:
         defaults: dict[str, object] = {
@@ -58,6 +64,12 @@ class MockTrainConfig:
             "num_workers": 0,
             "pin_memory": False,
             "compile_model": False,
+            "compile_mode": "reduce-overhead",
+            "auto_batch_size": False,
+            "auto_batch_ref_block_size": 512,
+            "auto_batch_min": 1,
+            "activation_checkpointing": False,
+            "activation_checkpoint_threshold_mb": 0.0,
         }
         defaults.update(kwargs)
         for k, v in defaults.items():
@@ -83,6 +95,12 @@ class TrainConfigTest(unittest.TestCase):
         self.assertEqual(config.num_workers, 0)
         self.assertFalse(config.pin_memory)
         self.assertFalse(config.compile_model)
+        self.assertEqual(config.compile_mode, "reduce-overhead")
+        self.assertFalse(config.activation_checkpointing)
+        self.assertEqual(float(config.activation_checkpoint_threshold_mb), 0.0)
+        self.assertFalse(config.auto_batch_size)
+        self.assertEqual(int(config.auto_batch_ref_block_size), 512)
+        self.assertEqual(int(config.auto_batch_min), 1)
 
     def test_custom_optimization_values(self) -> None:
         """Test custom values for optimization fields."""
@@ -97,7 +115,13 @@ class TrainConfigTest(unittest.TestCase):
             gradient_accumulation_steps=4,
             num_workers=4,
             pin_memory=True,
-            compile_model=True,
+            compile_model="auto",
+            compile_mode="max-autotune",
+            activation_checkpointing=True,
+            activation_checkpoint_threshold_mb=64.0,
+            auto_batch_size=True,
+            auto_batch_ref_block_size=512,
+            auto_batch_min=2,
         )
 
         self.assertFalse(config.cache_teacher_outputs)
@@ -106,7 +130,12 @@ class TrainConfigTest(unittest.TestCase):
         self.assertEqual(config.gradient_accumulation_steps, 4)
         self.assertEqual(config.num_workers, 4)
         self.assertTrue(config.pin_memory)
-        self.assertTrue(config.compile_model)
+        self.assertEqual(str(config.compile_model), "auto")
+        self.assertEqual(config.compile_mode, "max-autotune")
+        self.assertTrue(config.activation_checkpointing)
+        self.assertEqual(float(config.activation_checkpoint_threshold_mb), 64.0)
+        self.assertTrue(config.auto_batch_size)
+        self.assertEqual(int(config.auto_batch_min), 2)
 
 
 class BlockwiseConfigBuildingTest(unittest.TestCase):
@@ -230,6 +259,14 @@ class DataLoaderOptimizationsTest(unittest.TestCase):
         use_pin_memory = train.pin_memory and device.type == "cuda"
 
         self.assertFalse(use_pin_memory)  # MPS doesn't support pin_memory
+
+    def test_auto_batch_size_scales_with_block_size(self) -> None:
+        """Auto batch size scales inversely with block size."""
+        train = MockTrainConfig(batch_size=8, block_size=1024)
+        # Mirror Upcycle.build_loaders scaling: bs * (ref / block_size)
+        ref = 512
+        tuned = max(1, int(train.batch_size * (ref / float(train.block_size))))
+        self.assertEqual(tuned, 4)
 
 
 class TorchCompileTest(unittest.TestCase):

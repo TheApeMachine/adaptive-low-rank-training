@@ -4,18 +4,22 @@ Unit tests for the generate module.
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 import torch
 from torch import nn
 
 from caramba.config.kvcache import KVCacheKind
 from caramba.config.layer import AttentionLayerConfig, AttentionMode, LayerType
+from caramba.infer.cache_plan import cache_plan_key, cache_plan_payload, save_cached_kind
 from caramba.infer.generate import (
     GenerateConfig,
     Generator,
     count_attention_layers,
     create_caches,
     get_attention_configs,
+    _resolve_cache_kind,
     sample_next_token,
 )
 from caramba.layer.attention import AttentionLayer
@@ -105,6 +109,11 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertIsNone(cfg.eos_token_id)
         self.assertEqual(cfg.max_seq_len, 2048)
         self.assertEqual(cfg.cache_kind, KVCacheKind.FP16)
+        self.assertIsNone(cfg.cache_budget_mb)
+        self.assertFalse(cfg.cache_auto_benchmark)
+        self.assertGreaterEqual(cfg.cache_auto_bench_steps, 0)
+        self.assertEqual(cfg.decode_plan, "auto")
+        self.assertGreater(cfg.decode_bucket_mid, cfg.decode_bucket_short)
 
     def test_custom_values(self) -> None:
         """Custom values override defaults."""
@@ -116,6 +125,9 @@ class TestGenerateConfig(unittest.TestCase):
             eos_token_id=2,
             max_seq_len=4096,
             cache_kind=KVCacheKind.Q8_0,
+            cache_budget_mb=123.0,
+            cache_auto_benchmark=True,
+            cache_auto_bench_steps=0,
         )
         self.assertEqual(cfg.max_new_tokens, 128)
         self.assertAlmostEqual(cfg.temperature, 0.7)
@@ -126,6 +138,50 @@ class TestGenerateConfig(unittest.TestCase):
         self.assertEqual(cfg.eos_token_id, 2)
         self.assertEqual(cfg.max_seq_len, 4096)
         self.assertEqual(cfg.cache_kind, KVCacheKind.Q8_0)
+        self.assertEqual(cfg.cache_budget_mb, 123.0)
+        self.assertTrue(cfg.cache_auto_benchmark)
+
+
+class TestCachePlanPersistence(unittest.TestCase):
+    """Tests for persistence of cache-kind auto selection decisions."""
+
+    def test_cache_plan_reuses_cached_kind(self) -> None:
+        """If a plan exists, _resolve_cache_kind should reuse it."""
+        model = AttentionModel(n_layers=1)
+        with tempfile.TemporaryDirectory() as td:
+            plan_path = Path(td) / "cache_plan.json"
+            cfg = GenerateConfig(
+                cache_kind="auto",
+                cache_auto_benchmark=False,
+                cache_plan_path=str(plan_path),
+            )
+
+            payload = cache_plan_payload(
+                model=model,
+                batch_size=1,
+                max_seq_len=int(cfg.max_seq_len),
+                qblock=int(cfg.cache_qblock),
+                residual_len=int(cfg.cache_residual_len),
+                budget_mb=cfg.cache_budget_mb,
+                quality_max_delta_nll=cfg.cache_quality_max_delta_nll,
+                quality_max_ppl_ratio=cfg.cache_quality_max_ppl_ratio,
+                quality_max_mean_kl=cfg.cache_quality_max_mean_kl,
+                quality_prompt_len=int(cfg.cache_quality_prompt_len),
+                quality_decode_steps=int(cfg.cache_quality_decode_steps),
+                auto_benchmark=bool(cfg.cache_auto_benchmark),
+                auto_bench_steps=int(cfg.cache_auto_bench_steps),
+                auto_bench_prompt_len=int(cfg.cache_auto_bench_prompt_len),
+            )
+            key = cache_plan_key(payload)
+            save_cached_kind(plan_path, key=key, kind=KVCacheKind.Q8_0)
+
+            chosen = _resolve_cache_kind(
+                model,
+                batch_size=1,
+                max_seq_len=int(cfg.max_seq_len),
+                config=cfg,
+            )
+            self.assertEqual(chosen, KVCacheKind.Q8_0)
 
 
 class TestCountAttentionLayers(unittest.TestCase):
@@ -192,6 +248,24 @@ class TestCreateCaches(unittest.TestCase):
         for cache in caches:
             self.assertIsInstance(cache, LayerKVCache)
 
+    def test_fp16_prefix_layers(self) -> None:
+        """fp16_prefix_layers promotes early caches to fp16."""
+        model = AttentionModel(n_layers=3)
+        caches = create_caches(
+            model,
+            batch_size=1,
+            max_seq_len=64,
+            device=torch.device("cpu"),
+            cache_kind=KVCacheKind.Q4_0,
+            fp16_prefix_layers=1,
+        )
+        self.assertEqual(len(caches), 3)
+        c0 = caches[0]
+        c1 = caches[1]
+        # LayerKVCache exposes k/v SeqCacheTensor with .kind.
+        self.assertEqual(c0.k.kind, KVCacheKind.FP16)  # type: ignore[attr-defined]
+        self.assertEqual(c1.k.kind, KVCacheKind.Q4_0)  # type: ignore[attr-defined]
+
     def test_dba_attention(self) -> None:
         """DBA attention creates DecoupledLayerKVCache."""
         model = DBAModel(n_layers=2)
@@ -241,6 +315,46 @@ class TestSampleNextToken(unittest.TestCase):
         logits = torch.randn(4, 100)  # batch_size=4, vocab_size=100
         tokens = sample_next_token(logits, temperature=1.0)
         self.assertEqual(tokens.shape, (4,))
+
+
+class TestDecodePlanBucketing(unittest.TestCase):
+    """Tests for decode-plan bucketing (q_chunk/local_window by prefix length)."""
+
+    def test_auto_bucketing(self) -> None:
+        """auto plan should bucket by prefix length."""
+        cfg = GenerateConfig(
+            decode_plan="auto",
+            decode_bucket_short=10,
+            decode_bucket_mid=20,
+            decode_q_chunk_mid=128,
+            decode_q_chunk_long=64,
+            decode_local_window_long=2048,
+        )
+        g = Generator(AttentionModel(n_layers=1), config=cfg)
+
+        self.assertEqual(g._plan_for_pos(0), (None, None))
+        self.assertEqual(g._plan_for_pos(9), (None, None))
+        self.assertEqual(g._plan_for_pos(10), (128, None))
+        self.assertEqual(g._plan_for_pos(19), (128, None))
+        self.assertEqual(g._plan_for_pos(20), (64, 2048))
+
+    def test_fixed_plan(self) -> None:
+        """fixed plan should always return configured overrides."""
+        cfg = GenerateConfig(
+            decode_plan="fixed",
+            decode_q_chunk=32,
+            decode_local_window=256,
+        )
+        g = Generator(AttentionModel(n_layers=1), config=cfg)
+        self.assertEqual(g._plan_for_pos(0), (32, 256))
+        self.assertEqual(g._plan_for_pos(9999), (32, 256))
+
+    def test_none_plan(self) -> None:
+        """none plan should disable overrides."""
+        cfg = GenerateConfig(decode_plan="none", decode_q_chunk=32, decode_local_window=256)
+        g = Generator(AttentionModel(n_layers=1), config=cfg)
+        self.assertEqual(g._plan_for_pos(0), (None, None))
+        self.assertEqual(g._plan_for_pos(9999), (None, None))
 
 
 class TestGenerator(unittest.TestCase):

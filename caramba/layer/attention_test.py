@@ -94,6 +94,93 @@ class TestAttentionLayerStandard(unittest.TestCase):
 
         torch.testing.assert_close(y1, y2)
 
+    def test_q_chunk_matches_full_attention(self) -> None:
+        """Chunked SDPA matches full attention in eval mode."""
+        cfg_full = AttentionLayerConfig(
+            d_model=self.d_model, n_heads=self.n_heads, is_causal=True, dropout_p=0.0
+        )
+        cfg_chunk = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            is_causal=True,
+            dropout_p=0.0,
+            q_chunk=3,
+        )
+        full = AttentionLayer(cfg_full).eval()
+        chunked = AttentionLayer(cfg_chunk).eval()
+        chunked.load_state_dict(full.state_dict())
+
+        x = torch.randn(1, 9, self.d_model)
+        y_full, _ = full(x)
+        y_chunk, _ = chunked(x)
+        torch.testing.assert_close(y_full, y_chunk, atol=1e-5, rtol=1e-5)
+
+    def test_local_window_one_only_self(self) -> None:
+        """local_window=1 forces each token to attend only to itself."""
+        cfg = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            is_causal=True,
+            dropout_p=0.0,
+            q_chunk=4,
+            local_window=1,
+        )
+        layer = AttentionLayer(cfg).eval()
+
+        x = torch.randn(2, 7, self.d_model)
+        y, _ = layer(x)
+
+        # With window=1, attention output equals V (single key), then out_proj.
+        v = layer.v_proj(x)
+        expected = layer.out_proj(v)
+        torch.testing.assert_close(y, expected, atol=1e-5, rtol=1e-5)
+
+    def test_mem_block_summarization_enabled(self) -> None:
+        """mem_block summarization runs and preserves output shape."""
+        cfg = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            is_causal=True,
+            dropout_p=0.0,
+            q_chunk=4,
+            local_window=8,
+            mem_block=4,
+            mem_summarize="mean",
+        )
+        layer = AttentionLayer(cfg).eval()
+        x = torch.randn(2, 32, self.d_model)
+        y, _ = layer(x)
+        self.assertEqual(y.shape, x.shape)
+
+    def test_mem_activation_threshold_disables_summarization(self) -> None:
+        """mem_activation_threshold can disable summarization for short sequences."""
+        cfg_base = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            is_causal=True,
+            dropout_p=0.0,
+            q_chunk=4,
+            local_window=8,
+        )
+        cfg_mem_disabled = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            is_causal=True,
+            dropout_p=0.0,
+            q_chunk=4,
+            local_window=8,
+            mem_block=4,
+            mem_summarize="mean",
+            mem_activation_threshold=10_000,  # disable for small T
+        )
+        base = AttentionLayer(cfg_base).eval()
+        mem = AttentionLayer(cfg_mem_disabled).eval()
+        mem.load_state_dict(base.state_dict())
+        x = torch.randn(1, 32, self.d_model)
+        y_base, _ = base(x)
+        y_mem, _ = mem(x)
+        torch.testing.assert_close(y_base, y_mem, atol=1e-5, rtol=1e-5)
+
 
 class TestAttentionLayerGQA(unittest.TestCase):
     """Tests for grouped-query attention."""
@@ -185,6 +272,35 @@ class TestAttentionLayerDecoupled(unittest.TestCase):
         y, _ = layer(x)
 
         self.assertEqual(y.shape, x.shape)
+
+    def test_decoupled_q_chunk_matches_full(self) -> None:
+        """Chunked DBA matches full DBA in eval mode."""
+        cfg_full = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            mode=AttentionMode.DECOUPLED,
+            sem_dim=128,
+            geo_dim=256,
+            dropout_p=0.0,
+            is_causal=True,
+        )
+        cfg_chunk = AttentionLayerConfig(
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            mode=AttentionMode.DECOUPLED,
+            sem_dim=128,
+            geo_dim=256,
+            dropout_p=0.0,
+            is_causal=True,
+            q_chunk=4,
+        )
+        full = AttentionLayer(cfg_full).eval()
+        chunked = AttentionLayer(cfg_chunk).eval()
+        chunked.load_state_dict(full.state_dict())
+        x = torch.randn(1, 10, self.d_model)
+        y_full, _ = full(x)
+        y_chunk, _ = chunked(x)
+        torch.testing.assert_close(y_full, y_chunk, atol=1e-5, rtol=1e-5)
 
     def test_has_semantic_projections(self) -> None:
         """Decoupled mode has semantic Q/K projections."""
@@ -476,6 +592,96 @@ class TestAttentionWithCache(unittest.TestCase):
 
         # Results should be close (not exact due to floating point accumulation)
         torch.testing.assert_close(y_full, y_incremental, rtol=1e-3, atol=1e-3)
+
+    def test_ctx_overrides_q_chunk_and_local_window(self) -> None:
+        """InferContext can override q_chunk/local_window for long prefixes."""
+        from caramba.infer.context import InferContext
+        from caramba.cache.layer import LayerKVCache
+        from caramba.config.kvcache import KVCacheTensorConfig, KVCacheKind
+
+        cfg = AttentionLayerConfig(d_model=self.d_model, n_heads=self.n_heads, is_causal=True)
+        layer = AttentionLayer(cfg)
+        layer.eval()
+
+        cache = LayerKVCache(
+            batch_size=self.batch_size,
+            max_seq_len=self.max_seq_len,
+            k_dim=self.d_model,
+            v_dim=self.d_model,
+            k_cfg=KVCacheTensorConfig(kind=KVCacheKind.FP16, qblock=32, residual_len=0),
+            v_cfg=KVCacheTensorConfig(kind=KVCacheKind.FP16, qblock=32, residual_len=0),
+            device=self.device,
+        )
+        ctx = InferContext(caches=[cache], pos_offset=0)
+        # Override plan knobs.
+        ctx.begin(pos_offset=0, q_chunk=4, local_window=1)
+        x = torch.randn(self.batch_size, 8, self.d_model, device=self.device)
+        y, _ = layer(x, ctx=ctx)
+        self.assertEqual(y.shape, (self.batch_size, 8, self.d_model))
+
+
+class TestAttentionMemorySummarization(unittest.TestCase):
+    """Tests for mem_block memory summarization helpers."""
+
+    def test_mem_block_reduces_kv_length(self) -> None:
+        """mem_block summarizes older tokens into fewer memory tokens."""
+        cfg = AttentionLayerConfig(
+            d_model=32,
+            n_heads=4,
+            mode=AttentionMode.STANDARD,
+            is_causal=True,
+            q_chunk=4,
+            local_window=4,
+            mem_block=2,
+            mem_summarize="mean",
+        )
+        layer = AttentionLayer(cfg)
+        B, T, D = 1, 8, 32
+        x = torch.randn(B, T, D)
+
+        q = layer.q_proj(x)  # type: ignore[union-attr]
+        k = layer.k_proj(x)  # type: ignore[union-attr]
+        v = layer.v_proj(x)
+        qh = layer._shape(q, layer.head_dim, layer.n_heads)
+        kh = layer._shape(k, layer.head_dim, layer.n_kv_heads)
+        vh = layer._shape(v, layer.head_dim, layer.n_kv_heads)
+        if layer.group_size > 1:
+            kh = kh.repeat_interleave(layer.group_size, dim=1)
+            vh = vh.repeat_interleave(layer.group_size, dim=1)
+
+        k_pos = torch.arange(T, device=qh.device)
+        k2, v2, pos2 = layer._maybe_summarize_kv(k=kh, v=vh, k_pos=k_pos)
+        # remote_len=4, mem_block=2 => 2 mem + 4 local = 6
+        self.assertEqual(k2.size(2), 6)
+        self.assertEqual(v2.size(2), 6)
+        self.assertEqual(pos2.numel(), 6)
+
+    def test_activation_threshold_disables_summarization(self) -> None:
+        """mem_activation_threshold prevents summarization below the threshold."""
+        cfg = AttentionLayerConfig(
+            d_model=32,
+            n_heads=4,
+            mode=AttentionMode.STANDARD,
+            is_causal=True,
+            local_window=4,
+            mem_block=2,
+            mem_activation_threshold=999,
+        )
+        layer = AttentionLayer(cfg)
+        B, T, D = 1, 8, 32
+        x = torch.randn(B, T, D)
+        k = layer.k_proj(x)  # type: ignore[union-attr]
+        v = layer.v_proj(x)
+        kh = layer._shape(k, layer.head_dim, layer.n_kv_heads)
+        vh = layer._shape(v, layer.head_dim, layer.n_kv_heads)
+        if layer.group_size > 1:
+            kh = kh.repeat_interleave(layer.group_size, dim=1)
+            vh = vh.repeat_interleave(layer.group_size, dim=1)
+        k_pos = torch.arange(T, device=kh.device)
+        k2, v2, pos2 = layer._maybe_summarize_kv(k=kh, v=vh, k_pos=k_pos)
+        self.assertEqual(k2.size(2), T)
+        self.assertEqual(v2.size(2), T)
+        self.assertEqual(pos2.numel(), T)
 
 
 class TestLearnedTemperature(unittest.TestCase):

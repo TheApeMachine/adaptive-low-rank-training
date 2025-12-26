@@ -17,6 +17,35 @@ from torch.utils.data import Dataset
 from typing_extensions import override
 
 
+_INT32_MAX = 2**31 - 1
+
+
+def _validate_tokens_int32_safe(t: Tensor) -> None:
+    """Validate that token IDs are non-negative and fit in int32.
+
+    Why this exists:
+    - We store tokens as int64 in PyTorch, but many kernels/tools assume int32-safe IDs.
+    - Scanning multi-billion-token arrays is expensive, so we sample.
+    """
+
+    if t.numel() <= 0:
+        raise ValueError("Token tensor is empty.")
+
+    sample_n = min(int(t.numel()), 100_000)
+    if sample_n == int(t.numel()):
+        sample = t
+    else:
+        idx = torch.randint(0, int(t.numel()), (sample_n,), device=t.device)
+        sample = t.view(-1).index_select(0, idx)
+
+    mn = int(sample.min().item())
+    mx = int(sample.max().item())
+    if mn < 0:
+        raise ValueError(f"Token IDs must be non-negative, found min={mn}")
+    if mx > _INT32_MAX:
+        raise ValueError(f"Token IDs must fit in int32, found max={mx}")
+
+
 def _require_numpy() -> object:
     """Import numpy, raising a clear error if missing."""
     if importlib.util.find_spec("numpy") is None:
@@ -29,12 +58,12 @@ def _np_attr(np_mod: object, name: str) -> object:
     return getattr(np_mod, name, None)
 
 
-def _np_call(np_mod: object, name: str, *args: object) -> object:
+def _np_call(np_mod: object, name: str, *args: object, **kwargs: object) -> object:
     """Call a numpy function by name."""
     fn = _np_attr(np_mod, name)
     if not callable(fn):
         raise AttributeError(f"numpy.{name} is not callable")
-    return fn(*args)
+    return fn(*args, **kwargs)
 
 
 class NpyDataset(Dataset[tuple[Tensor, Tensor]]):
@@ -58,7 +87,8 @@ class NpyDataset(Dataset[tuple[Tensor, Tensor]]):
             raise ValueError(f"block_size must be > 0, got {block_size}")
 
         np_mod = _require_numpy()
-        arr_obj = _np_call(np_mod, "load", str(path))
+        # Use mmap_mode="r" to avoid materializing large arrays into RAM.
+        arr_obj = _np_call(np_mod, "load", str(path), mmap_mode="r")
         ndarray_t = _np_attr(np_mod, "ndarray")
         if not isinstance(ndarray_t, type) or not isinstance(arr_obj, ndarray_t):
             raise TypeError("Expected numpy.load to return a numpy ndarray/memmap")
@@ -69,17 +99,17 @@ class NpyDataset(Dataset[tuple[Tensor, Tensor]]):
         arr = reshape(-1)
         t = cast(Tensor, torch.from_numpy(arr)).to(dtype=torch.long)
 
-        # Clone if the array is read-only (memory-mapped)
-        flags = getattr(arr, "flags", None)
-        writeable = bool(getattr(flags, "writeable", True))
-        if not writeable:
-            t = t.clone()
+        # Note: we intentionally do NOT clone read-only memmaps.
+        # The dataset never mutates token storage, and cloning would defeat
+        # memory mapping for large corpora.
 
         if len(t) <= int(block_size):
             raise ValueError(
                 f"block_size must be smaller than data length, got "
                 f"block_size={block_size}, len={len(t)}"
             )
+
+        _validate_tokens_int32_safe(t)
 
         self.tokens = t
         self.block_size = int(block_size)

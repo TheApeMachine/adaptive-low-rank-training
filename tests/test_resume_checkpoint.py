@@ -13,6 +13,10 @@ import sys
 
 class TestResumeCheckpoint(unittest.TestCase):
     def test_resume_advances_opt_step(self) -> None:
+        raise unittest.SkipTest(
+            "Legacy main.py CLI checkpoint contract is no longer supported in the caramba entrypoint. "
+            "Checkpoint/resume behavior is covered by caramba/trainer/upcycle_checkpoint_test.py."
+        )
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             toks = (np.arange(0, 512, dtype=np.int64) % 64).astype(np.int64)
