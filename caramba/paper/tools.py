@@ -10,13 +10,17 @@ Provides function tools that the AI agent can use to:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.parse
 import urllib.request
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+
+logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, Field
 
@@ -24,6 +28,7 @@ from agents import function_tool
 
 if TYPE_CHECKING:
     from caramba.config.paper import PaperConfig
+    from caramba.paper.review import ReviewResult
 
 
 # ============================================================================
@@ -81,10 +86,11 @@ class PaperState:
     """Shared state for paper drafting tools."""
 
     output_dir: Path
-    paper_config: "PaperConfig"
+    paper_config: "PaperConfig | None" = None
     manifest_path: Path | None = None
     experiment_results: dict | None = None
     artifacts: dict[str, Path] | None = None
+    review_result: "ReviewResult | None" = None  # Optional review result for tools to set
 
     @property
     def tex_path(self) -> Path:
@@ -102,21 +108,21 @@ class PaperState:
         return self.output_dir / "figures"
 
 
-# Global state - will be set by the drafter before running agent
-_state: PaperState | None = None
+# Context-local state for thread-safety with concurrent requests.
+_state_var: ContextVar[PaperState] = ContextVar("paper_state")
 
 
 def set_state(state: PaperState) -> None:
-    """Set the global paper state for tools to use."""
-    global _state
-    _state = state
+    """Set the context-local paper state for tools to use."""
+    _state_var.set(state)
 
 
 def get_state() -> PaperState:
-    """Get the global paper state."""
-    if _state is None:
+    """Get the context-local paper state."""
+    try:
+        return _state_var.get()
+    except LookupError:
         raise RuntimeError("Paper state not initialized. Call set_state first.")
-    return _state
 
 
 # ============================================================================
@@ -149,7 +155,11 @@ def write_tex_file(
     state.output_dir.mkdir(parents=True, exist_ok=True)
 
     # Optionally create a versioned backup
-    if state.paper_config.auto_version and state.tex_path.exists():
+    if (
+        state.paper_config is not None
+        and state.paper_config.auto_version
+        and state.tex_path.exists()
+    ):
         _create_backup(state.tex_path, state.paper_config.max_versions)
 
     state.tex_path.write_text(content, encoding="utf-8")
@@ -276,7 +286,7 @@ def search_arxiv(
     """
     try:
         # Build the arXiv API query
-        base_url = "http://export.arxiv.org/api/query"
+        base_url = "https://export.arxiv.org/api/query"
         params = {
             "search_query": f"all:{query}",
             "start": 0,
@@ -327,6 +337,7 @@ def search_arxiv(
         )
 
     except Exception as e:
+        logger.exception(f"arXiv search failed for query '{query}': {e}")
         return SearchResult(
             citations=[],
             query=query,
@@ -396,6 +407,7 @@ def search_semantic_scholar(
         )
 
     except Exception as e:
+        logger.exception(f"Semantic Scholar search failed for query '{query}': {e}")
         return SearchResult(
             citations=[],
             query=query,
@@ -521,7 +533,15 @@ def get_paper_template() -> str:
     state = get_state()
     config = state.paper_config
 
-    authors_str = " \\and ".join(config.authors) if config.authors else "Author Name"
+    # Handle optional paper_config
+    if config is not None:
+        authors_str = " \\and ".join(config.authors) if config.authors else "Author Name"
+        title = config.title
+        abstract_max_words = config.abstract_max_words
+    else:
+        authors_str = "Author Name"
+        title = "Untitled Paper"
+        abstract_max_words = 250
 
     template = f"""\\documentclass[11pt]{{article}}
 
@@ -544,7 +564,7 @@ def get_paper_template() -> str:
 % ============================================================================
 % Document Info
 % ============================================================================
-\\title{{{config.title}}}
+\\title{{{title}}}
 \\author{{{authors_str}}}
 \\date{{\\today}}
 
@@ -556,7 +576,7 @@ def get_paper_template() -> str:
 % Abstract
 % ============================================================================
 \\begin{{abstract}}
-[Abstract goes here - maximum {config.abstract_max_words} words]
+[Abstract goes here - maximum {abstract_max_words} words]
 \\end{{abstract}}
 
 % ============================================================================
@@ -642,14 +662,25 @@ def _create_backup(file_path: Path, max_versions: int) -> None:
     backup_dir = file_path.parent / "versions"
     backup_dir.mkdir(exist_ok=True)
 
-    # Find next version number
+    # Refresh and prune until we're below max_versions.
+    # This loop handles race conditions where files may be removed between checks.
+    while True:
+        existing = list(backup_dir.glob(f"{file_path.stem}_v*.tex"))
+        if len(existing) < max_versions:
+            break
+        # Remove oldest version by modification time.
+        if not existing:
+            break
+        oldest = min(existing, key=lambda p: p.stat().st_mtime)
+        try:
+            oldest.unlink()
+        except FileNotFoundError:
+            # File was already removed; re-check.
+            continue
+
+    # Determine next version number from remaining files.
     existing = list(backup_dir.glob(f"{file_path.stem}_v*.tex"))
     version = len(existing) + 1
-
-    if version > max_versions:
-        # Remove oldest version
-        oldest = min(existing, key=lambda p: p.stat().st_mtime)
-        oldest.unlink()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = backup_dir / f"{file_path.stem}_v{version:03d}_{timestamp}.tex"

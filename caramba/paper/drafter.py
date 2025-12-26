@@ -11,7 +11,6 @@ based on experiment manifests and results. It handles:
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -182,10 +181,10 @@ class PaperDrafter:
 
         # Determine the task based on whether a paper exists
         if state.tex_path.exists():
-            task = self._build_update_prompt(manifest, experiment_results, artifacts)
+            task = self._build_update_prompt(experiment_results, artifacts)
             logger.info("Updating existing paper draft...")
         else:
-            task = self._build_create_prompt(manifest, experiment_results, artifacts)
+            task = self._build_create_prompt(experiment_results, artifacts)
             logger.info("Creating new paper draft...")
 
         # Run the agent
@@ -219,20 +218,31 @@ class PaperDrafter:
     ) -> Path:
         """Synchronous wrapper for draft().
 
-        Convenient for calling from synchronous code.
+        Convenient for calling from synchronous code. Handles the case where
+        an event loop is already running (e.g., in Jupyter or nested async code).
         """
-        return asyncio.run(
-            self.draft(
-                manifest=manifest,
-                manifest_path=manifest_path,
-                experiment_results=experiment_results,
-                artifacts=artifacts,
-            )
+        coro = self.draft(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            experiment_results=experiment_results,
+            artifacts=artifacts,
         )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop running; safe to use asyncio.run.
+            return asyncio.run(coro)
+
+        # Event loop is already running; schedule the coroutine from a thread.
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
 
     def _build_create_prompt(
         self,
-        manifest: "Manifest | None",
         experiment_results: dict[str, Any] | None,
         artifacts: dict[str, Path] | None,
     ) -> str:
@@ -267,7 +277,6 @@ Please create a complete, well-structured paper draft."""
 
     def _build_update_prompt(
         self,
-        manifest: "Manifest | None",
         experiment_results: dict[str, Any] | None,
         artifacts: dict[str, Path] | None,
     ) -> str:

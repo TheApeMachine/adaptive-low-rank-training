@@ -31,3 +31,37 @@ def test_live_plotter_with_matplotlib() -> None:
     assert lp._fig is None
     assert lp._ax is None
 
+
+def test_live_plotter_sparse_metric_alignment() -> None:
+    """Test alignment logic when metrics appear at different steps."""
+    pytest.importorskip("matplotlib")
+    lp = LivePlotter(enabled=True, title="sparse_test", plot_every=1)
+
+    if not lp.enabled:
+        # matplotlib not available; skip the test logic.
+        lp.close()
+        return
+
+    # Call update with only "loss" for steps 1 and 2.
+    lp.update(step=1, scalars={"loss": 1.0})
+    lp.update(step=2, scalars={"loss": 0.9})
+
+    # Now add "acc" at steps 3 and 4.
+    lp.update(step=3, scalars={"loss": 0.8, "acc": 0.5})
+    lp.update(step=4, scalars={"loss": 0.7, "acc": 0.6})
+
+    # Assert that internal series lengths reflect the sparsity.
+    assert len(lp._series["loss"]) == 4, f"Expected 4 loss values, got {len(lp._series['loss'])}"
+    assert len(lp._series["acc"]) == 2, f"Expected 2 acc values, got {len(lp._series['acc'])}"
+
+    # Assert that _steps contains all 4 steps.
+    assert len(lp._steps) == 4, f"Expected 4 steps, got {len(lp._steps)}"
+    assert lp._steps == [1, 2, 3, 4], f"Expected [1, 2, 3, 4], got {lp._steps}"
+
+    # The x-coordinates used for "acc" should align with the last 2 steps (3 and 4).
+    # Based on the LivePlotter logic: xs = self._steps[-len(ys):]
+    acc_xs = lp._steps[-len(lp._series["acc"]):]
+    assert acc_xs == [3, 4], f"Expected acc x-coords [3, 4], got {acc_xs}"
+
+    lp.close()
+

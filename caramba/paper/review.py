@@ -124,11 +124,19 @@ class ReviewResult(BaseModel):
 
     @property
     def style_fixes_only(self) -> bool:
-        """Check if only style fixes are needed."""
-        return all(
-            c.action_type in (ReviewActionType.STYLE_FIX, ReviewActionType.CLARIFICATION)
-            for c in self.comments
-        ) and len(self.proposed_experiments) == 0
+        """Check if only style fixes are needed.
+
+        Returns True only when there is at least one comment and every
+        comment is a STYLE_FIX or CLARIFICATION, with no proposed experiments.
+        """
+        return (
+            len(self.comments) > 0
+            and all(
+                c.action_type in (ReviewActionType.STYLE_FIX, ReviewActionType.CLARIFICATION)
+                for c in self.comments
+            )
+            and len(self.proposed_experiments) == 0
+        )
 
     @property
     def critical_issues(self) -> list[ReviewComment]:

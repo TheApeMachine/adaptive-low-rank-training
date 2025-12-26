@@ -24,6 +24,7 @@ from caramba.config.mode import Mode
 from caramba.console import logger
 
 
+
 @dataclass(frozen=True, slots=True)
 class ExperimentCommand:
     """Command to run a full experiment with benchmarks and artifact generation."""
@@ -60,6 +61,12 @@ class ResearchCommand:
     manifest_path: Path
     output_dir: Path | None
     max_iterations: int
+
+
+# Type alias for all command types returned by parse_command
+AnyCommand = (
+    Command | ExperimentCommand | PaperCommand | ReviewCommand | ResearchCommand
+)
 
 
 class _Args(argparse.Namespace):
@@ -366,7 +373,7 @@ class CLI(argparse.ArgumentParser):
         compiler.validator.validate_manifest(manifest)
         return manifest
 
-    def parse_command(self, argv: list[str] | None = None) -> Command | ExperimentCommand | PaperCommand | ReviewCommand | ResearchCommand:
+    def parse_command(self, argv: list[str] | None = None) -> AnyCommand:
         """Parse CLI arguments into a typed command payload."""
         args = self.parse_args(argv, namespace=_Args())
 
@@ -540,9 +547,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 # Build review config
                 review_config = cmd.manifest.review or ReviewConfig()
-                review_config = ReviewConfig(
-                    **{**review_config.model_dump(), "strictness": cmd.strictness}
-                )
+                review_config = review_config.model_copy(update={"strictness": cmd.strictness})
 
                 logger.header("Paper Reviewer", f"Reviewing paper in {cmd.paper_dir}")
 

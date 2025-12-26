@@ -158,6 +158,15 @@ def _resolve_cache_kind(
                 return cached
 
     # If benchmarking isn't requested (or no steps), pick the highest-quality candidate.
+    # Resolve vocab_size once for use in quality gates and benchmarks.
+    resolved_vocab_size = getattr(model, "vocab_size", None)
+    if resolved_vocab_size is None:
+        config_attr = getattr(model, "config", None)
+        if config_attr is not None:
+            resolved_vocab_size = getattr(config_attr, "vocab_size", None)
+    if resolved_vocab_size is None or resolved_vocab_size < 1:
+        resolved_vocab_size = 1000  # Safe fallback
+
     # Optional short-context quality gate vs fp16 baseline.
     if (
         config.cache_quality_max_delta_nll is not None
@@ -167,7 +176,7 @@ def _resolve_cache_kind(
         gate_candidates: list[KVCacheKind] = []
         # Random sequence for a cheap approximation (real gates can use dataset-driven tokens).
         seq_len = max(2, min(max_seq_len, int(config.cache_quality_prompt_len) + 16))
-        token_ids = torch.randint(0, 1000, (batch_size, seq_len), device=bench_device, dtype=torch.long)
+        token_ids = torch.randint(0, int(resolved_vocab_size), (batch_size, seq_len), device=bench_device, dtype=torch.long)
         for k in candidates:
             try:
                 res = short_context_fidelity_check(
@@ -239,16 +248,9 @@ def _resolve_cache_kind(
         except Exception:
             continue
 
-        # Random prompt using model's vocab size if available, otherwise fallback to 1000.
-        vocab_size = getattr(model, "vocab_size", None)
-        if vocab_size is None:
-            config_attr = getattr(model, "config", None)
-            if config_attr is not None:
-                vocab_size = getattr(config_attr, "vocab_size", None)
-        if vocab_size is None or vocab_size < 1:
-            vocab_size = 1000  # Safe fallback
+        # Random prompt using precomputed vocab_size.
         input_ids = torch.randint(
-            0, int(vocab_size), (batch_size, prompt_len), dtype=torch.long, device=bench_device
+            0, int(resolved_vocab_size), (batch_size, prompt_len), dtype=torch.long, device=bench_device
         )
         t0 = time.perf_counter()
         try:

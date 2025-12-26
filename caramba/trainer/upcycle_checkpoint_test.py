@@ -14,12 +14,12 @@ def test_validate_checkpoint_state_rejects_missing_keys() -> None:
 def test_validate_checkpoint_state_accepts_valid_state() -> None:
     """Test that a complete, valid checkpoint state dict is accepted."""
     # Construct a dict with all required keys expected by the validator.
+    # The validator expects "student_state_dict" (not "model_state_dict").
     valid_state: dict[str, object] = {
         "run_id": "test_run",
         "phase": "global",
         "step": 100,
-        "model_state_dict": {},
-        "optimizer_state_dict": {},
+        "student_state_dict": {},
     }
     # Should not raise; if it does, the test fails.
     try:

@@ -258,12 +258,12 @@ class ExperimentRunner:
         for name, path in artifacts.items():
             if name == "report.json" and path.exists():
                 try:
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         report = json.load(f)
                         results["benchmark_summary"] = report.get("summary", {})
                         results["metadata"] = report.get("metadata", {})
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(f"Failed to load report.json from {path}: {e}")
 
         return results
 

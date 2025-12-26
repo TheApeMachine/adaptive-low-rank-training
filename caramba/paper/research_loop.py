@@ -231,7 +231,7 @@ class ResearchLoop:
                 ):
                     logger.success(f"✓ Paper approved with minor fixes (score {review.overall_score:.1f})")
                     # Do one more style fix iteration then approve
-                    await self._apply_style_fixes(iteration, review, paper_path)
+                    await self._prepare_style_fixes(iteration, review, paper_path)
                     self._record_iteration(
                         iteration, LoopAction.APPROVE, review_score=review.overall_score
                     )
@@ -272,7 +272,7 @@ class ResearchLoop:
                     )
                 else:
                     # Just style fixes needed
-                    await self._apply_style_fixes(iteration, review, paper_path)
+                    await self._prepare_style_fixes(iteration, review, paper_path)
                     self._record_iteration(
                         iteration,
                         LoopAction.STYLE_FIX,
@@ -294,12 +294,13 @@ class ResearchLoop:
 
         # Max iterations reached
         logger.warning(f"Max iterations ({self.loop_config.max_iterations}) reached")
+        final_score_msg = f"Final score: {final_score:.1f}/10" if final_score is not None else "No final score"
         return self._build_result(
             success=False,
             final_action=LoopAction.MAX_ITERATIONS,
             paper_path=paper_path,
             final_score=final_score,
-            message=f"Max iterations reached. Final score: {final_score:.1f}/10" if final_score else "Max iterations reached",
+            message=f"Max iterations reached. {final_score_msg}",
         )
 
     def run_sync(
@@ -309,15 +310,32 @@ class ResearchLoop:
         experiment_results: dict[str, Any] | None = None,
         artifacts: dict[str, Path] | None = None,
     ) -> ResearchLoopResult:
-        """Synchronous wrapper for run()."""
-        return asyncio.run(
-            self.run(
-                manifest=manifest,
-                manifest_path=manifest_path,
-                experiment_results=experiment_results,
-                artifacts=artifacts,
+        """Synchronous wrapper for run().
+
+        Raises:
+            RuntimeError: If called from within an already running event loop.
+                          In that case, use `await run()` instead.
+        """
+        try:
+            asyncio.get_running_loop()
+            # If we get here, a loop is already running.
+            raise RuntimeError(
+                "run_sync() cannot be called from within an already running event loop. "
+                "Use `await loop.run(...)` instead, or consider using nest_asyncio if needed."
             )
-        )
+        except RuntimeError as e:
+            if "no running event loop" in str(e).lower():
+                # No loop running; safe to use asyncio.run.
+                return asyncio.run(
+                    self.run(
+                        manifest=manifest,
+                        manifest_path=manifest_path,
+                        experiment_results=experiment_results,
+                        artifacts=artifacts,
+                    )
+                )
+            # Re-raise if it's our custom error or another RuntimeError.
+            raise
 
     async def _write_or_update_paper(
         self,
@@ -350,7 +368,7 @@ class ResearchLoop:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             shutil.copy(result_path, version_dir / f"paper_iter{iteration}_{timestamp}.tex")
 
-        self._record_iteration(iteration, action)
+        # Note: iteration recording is done by the caller in run() to avoid duplicates.
         return result_path
 
     async def _review_paper(
@@ -454,13 +472,12 @@ class ResearchLoop:
 
         logger.info(f"Executing experiment from {manifest_path}")
 
-        # This is synchronous but we wrap it
-        # In a real implementation, you might want to use subprocess or async execution
+        # Run the experiment in a thread to avoid blocking the event loop.
         try:
-            artifacts = run_experiment(manifest_path)
+            artifacts = await asyncio.to_thread(run_experiment, manifest_path)
 
             # Build results summary
-            results = {
+            results: dict[str, Any] = {
                 "experiment_name": experiment_name,
                 "manifest_path": str(manifest_path),
                 "artifacts": {name: str(path) for name, path in artifacts.items()},
@@ -470,7 +487,7 @@ class ResearchLoop:
             # Try to load report.json for metrics
             for name, path in artifacts.items():
                 if name == "report.json" and path.exists():
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         report = json.load(f)
                         results["metrics"] = report.get("summary", {})
 
@@ -480,17 +497,21 @@ class ResearchLoop:
             logger.error(f"Experiment execution failed: {e}")
             return {"error": str(e), "completed": False}, {}
 
-    async def _apply_style_fixes(
+    async def _prepare_style_fixes(
         self,
         iteration: int,
         review: "ReviewResult",
         paper_path: Path,
     ) -> None:
-        """Apply style fixes based on review feedback."""
-        logger.step(4, 4, "Applying style fixes")
+        """Prepare style fixes to be applied in the next iteration.
 
-        # The next iteration's paper update will incorporate the review feedback
-        # We could also have a dedicated style-fix agent here
+        Note: This method does not modify the paper directly. It only logs
+        the suggested fixes so they can be incorporated in the next paper update.
+        """
+        logger.step(4, 4, "Preparing style fixes for next iteration")
+
+        # The next iteration's paper update will incorporate the review feedback.
+        # We could also have a dedicated style-fix agent here.
         logger.info(f"Style fixes will be applied in next paper update")
         logger.info(f"Weaknesses to address: {', '.join(review.weaknesses[:3])}")
 

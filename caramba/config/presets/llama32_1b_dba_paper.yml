@@ -57,8 +57,7 @@ paper:
   enabled: true
   title: "Decoupled Bottleneck Attention: Efficient KV-Cache Compression via Attention Surgery"
   authors:
-    - "Your Name"
-    - "Collaborator Name"
+    - "Daniel Owen van Dommelen"
   paper_type: paper
 
   # Sections to include

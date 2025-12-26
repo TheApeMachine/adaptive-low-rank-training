@@ -209,15 +209,11 @@ class PaperReviewer:
         if not tex_path.exists():
             raise FileNotFoundError(f"No paper.tex found in {self.output_dir}")
 
-        # Set up state for tools (reuse from drafter tools)
-        from caramba.config.paper import PaperConfig
-
-        # Create a minimal paper config for state
-        paper_config = PaperConfig(title="Review Target")
-
+        # Set up state for tools (reuse from drafter tools).
+        # PaperState accepts optional paper_config; pass None since we're only reviewing.
         state = PaperState(
             output_dir=self.output_dir,
-            paper_config=paper_config,
+            paper_config=None,
             manifest_path=Path(manifest_path) if manifest_path else None,
             experiment_results=experiment_results,
         )
@@ -237,26 +233,34 @@ class PaperReviewer:
             logger.error(f"Review failed: {e}")
             raise
 
-        # Parse the review result from state
-        review_data = getattr(state, "_review_result", None)
+        # Parse the review result from state (check typed attribute first, then fallback).
+        review_data = getattr(state, "review_result", None)
+        if review_data is None:
+            review_data = getattr(state, "_review_result", None)
 
         if review_data:
-            return self._parse_review_result(review_data)
+            if isinstance(review_data, dict):
+                return self._parse_review_result(review_data)
+            elif isinstance(review_data, ReviewResult):
+                return review_data
         else:
             # Try to load from file
             review_path = self.output_dir / "review.json"
             if review_path.exists():
-                review_data = json.loads(review_path.read_text())
+                review_data = json.loads(review_path.read_text(encoding="utf-8"))
                 return self._parse_review_result(review_data)
 
-        # Fallback: create result from agent output
+        # Fallback: create explicit error result so callers can detect the error state.
+        logger.warning(
+            "Structured review output not captured. Check agent logs for details."
+        )
         return ReviewResult(
-            overall_score=5.0,
+            overall_score=0.0,
             recommendation=ReviewActionType.MAJOR_REVISION,
-            summary=result.final_output or "Review completed but structured output not captured.",
+            summary="ERROR: Structured review output not captured — see logs for details.",
             comments=[],
             strengths=[],
-            weaknesses=[],
+            weaknesses=["Structured output from reviewer agent was not captured."],
             proposed_experiments=[],
         )
 

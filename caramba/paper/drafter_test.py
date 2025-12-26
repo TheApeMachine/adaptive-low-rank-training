@@ -234,7 +234,7 @@ class TestPaperDrafter:
         )
         drafter = PaperDrafter(config)
 
-        prompt = drafter._build_create_prompt(None, None, None)
+        prompt = drafter._build_create_prompt(None, None)
 
         assert "My Paper Title" in prompt
         assert "John Doe" in prompt
@@ -245,7 +245,7 @@ class TestPaperDrafter:
         config = PaperConfig(title="Existing Paper")
         drafter = PaperDrafter(config)
 
-        prompt = drafter._build_update_prompt(None, None, None)
+        prompt = drafter._build_update_prompt(None, None)
 
         assert "update" in prompt.lower()
         assert "Existing Paper" in prompt

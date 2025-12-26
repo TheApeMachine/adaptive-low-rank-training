@@ -371,13 +371,8 @@ def generate_experiment_manifest(
     if not proposal:
         return f"ERROR: No proposal found with name '{experiment_name}'"
 
-    # Get base manifest if available
-    base_config = {}
-    if base_on_existing and state.manifest_path and state.manifest_path.exists():
-        # Read existing manifest for reference
-        manifest_content = state.manifest_path.read_text(encoding="utf-8")
-        # Extract key values we might want to reuse
-        base_config["reference"] = "Based on existing manifest"
+    # Note: base_on_existing is available for future use to extract and merge
+    # configuration from an existing manifest. Currently we generate from scratch.
 
     # Generate the manifest
     exp_type = proposal["experiment_type"]
@@ -525,15 +520,35 @@ def submit_review(
     """Submit the final review with overall assessment.
 
     This should be called after all analysis and proposals are complete.
+
+    Raises:
+        ValueError: If overall_score is out of range or recommendation is invalid.
     """
+    # Validate overall_score
+    try:
+        score = float(overall_score)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"overall_score must be a number, got: {overall_score}") from e
+
+    if score < 0.0 or score > 10.0:
+        raise ValueError(f"overall_score must be between 0.0 and 10.0, got: {score}")
+
+    # Validate recommendation
+    normalized_rec = str(recommendation).strip().lower()
+    allowed_recs = ("approve", "style_fix", "new_experiment", "major_revision")
+    if normalized_rec not in allowed_recs:
+        raise ValueError(
+            f"recommendation must be one of {allowed_recs}, got: '{recommendation}'"
+        )
+
     state = get_state()
 
     # Get proposed experiments
     proposals = getattr(state, "_proposed_experiments", [])
 
     review = {
-        "overall_score": overall_score,
-        "recommendation": recommendation,
+        "overall_score": score,
+        "recommendation": normalized_rec,
         "summary": summary,
         "strengths": [s.strip() for s in strengths.split(",")],
         "weaknesses": [w.strip() for w in weaknesses.split(",")],
@@ -553,8 +568,8 @@ def submit_review(
 ╔══════════════════════════════════════════════════════════════════╗
 ║                      REVIEW SUBMITTED                            ║
 ╠══════════════════════════════════════════════════════════════════╣
-║ Score: {overall_score:.1f}/10
-║ Recommendation: {recommendation.upper()}
+║ Score: {score:.1f}/10
+║ Recommendation: {normalized_rec.upper()}
 ╠══════════════════════════════════════════════════════════════════╣
 ║ Summary:
 ║ {summary[:60]}...
