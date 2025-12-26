@@ -172,10 +172,11 @@ def fused_decode_decoupled_q4q8q4(
     q_geo2 = q_geo[:, :, 0, :].contiguous().to(torch.float16)
 
     has_null = k_sem_null is not None and k_geo_null is not None and v_null is not None
-    if has_null and k_sem_null is not None and k_geo_null is not None and v_null is not None:
-        ksn = k_sem_null[:, :, 0, :].contiguous().to(torch.float16)
-        kgn = k_geo_null[:, :, 0, :].contiguous().to(torch.float16)
-        vn = v_null[:, :, 0, :].contiguous().to(torch.float16)
+    if has_null:
+        # Type narrowing: we know these are not None due to the has_null check
+        ksn = k_sem_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
+        kgn = k_geo_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
+        vn = v_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
     else:
         # Placeholder tensors (not used when HAS_NULL=False)
         ksn = q_sem2.new_zeros((B, H, sem_head_dim))
@@ -369,12 +370,16 @@ def fused_decode_decoupled_q4q8q4_2pass(
     q_geo2 = q_geo[:, :, 0, :].contiguous().to(torch.float16)
 
     has_null = k_sem_null is not None and k_geo_null is not None and v_null is not None
-    if has_null and k_sem_null is not None and k_geo_null is not None and v_null is not None:
-        ksn = k_sem_null[:, :, 0, :].contiguous().to(torch.float16)
-        kgn = k_geo_null[:, :, 0, :].contiguous().to(torch.float16)
-        vn = v_null[:, :, 0, :].contiguous().to(torch.float16)
+    if has_null:
+        # Type narrowing: we know these are not None due to the has_null check
+        ksn = k_sem_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
+        kgn = k_geo_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
+        vn = v_null[:, :, 0, :].contiguous().to(torch.float16)  # type: ignore[index]
     else:
-        ksn = kgn = vn = q_sem2  # Placeholder
+        # Placeholder tensors (not used when HAS_NULL=False but kernel still expects valid strides)
+        ksn = q_sem2.new_zeros((B, H, sem_head_dim))
+        kgn = q_geo2.new_zeros((B, H, geo_head_dim))
+        vn = q_sem2.new_zeros((B, H, v_head_dim))
 
     BH = B * H
 
@@ -548,8 +553,9 @@ def fused_decode_decoupled_q4q8q4_2pass(
         )
         update(s, vbh)
 
-        o = o_t.view(BH, v_head_dim)
+        m = m_t.view(BH)
         d = d_t.view(BH)
+        o = o_t.view(BH, v_head_dim)
 
     out = (o / d.clamp(min=1e-9).unsqueeze(-1)).view(B, H, 1, v_head_dim)
     return out.to(q_sem.dtype)

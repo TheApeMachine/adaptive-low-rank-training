@@ -54,8 +54,9 @@ class TestComparisonSummary(unittest.TestCase):
             teacher_tokens_per_sec=150.0,
             student_tokens_per_sec=225.0,
             speedup=1.5,
-            teacher_kvcache_mb_per_token=2.0,
-            student_kvcache_mb_per_token=0.4,
+            # Bytes per token: 2.0 MB = 2.0 * 1024 * 1024 bytes
+            teacher_kvcache_bytes_per_token=2.0 * 1024 * 1024,
+            student_kvcache_bytes_per_token=0.4 * 1024 * 1024,
             memory_reduction=5.0,
         )
         self.assertAlmostEqual(summary.teacher_perplexity, 8.5)

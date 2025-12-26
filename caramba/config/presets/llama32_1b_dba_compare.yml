@@ -117,7 +117,11 @@ groups:
           batch_size: 1
           block_size: 2048
           lr: 0.00005
-          # MPS-specific: see blockwise run for platform notes
+          # MPS-specific configuration:
+          # - device: mps (Apple Silicon GPU)
+          # - dtype: float32 (MPS has limited float16 support for some operations)
+          # For CUDA: use device: cuda and dtype: float16 or bfloat16
+          # For CPU fallback: use device: cpu and dtype: float32
           device: mps
           dtype: float32
     benchmarks:

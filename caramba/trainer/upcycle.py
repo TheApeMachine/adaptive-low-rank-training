@@ -204,17 +204,31 @@ class Upcycle:
                 f"KV cache reduction {reduction:.2f}x is below minimum {cfg.min_reduction_ratio}x"
             )
 
+    # Bytes per element constants for different precision/quantization formats
+    # These are approximate effective bytes including any scale factor overhead
+    BYTES_PER_FP32: float = 4.0  # 32-bit float = 4 bytes
+    BYTES_PER_FP16: float = 2.0  # 16-bit float = 2 bytes
+    BYTES_PER_Q8_0: float = 1.0  # int8 quantized ≈ 1 byte (int8 data + amortized scale overhead)
+    BYTES_PER_Q4_0: float = 0.625  # 4-bit quantized = 0.5 bytes data + 0.125 bytes scale overhead
+
     def _kind_to_bytes(self, kind: str) -> float:
-        """Convert cache kind to approximate bytes per element."""
+        """Convert cache kind to approximate bytes per element.
+
+        Args:
+            kind: The quantization/precision kind (fp32, fp16, q8_0, q4_0, nf4)
+
+        Returns:
+            Approximate bytes per element including any overhead
+        """
         kind_lower = kind.lower() if isinstance(kind, str) else str(kind.value).lower()
         if kind_lower == "fp32":
-            return 4.0
+            return self.BYTES_PER_FP32
         elif kind_lower == "fp16":
-            return 2.0
+            return self.BYTES_PER_FP16
         elif kind_lower == "q8_0":
-            return 1.0  # int8 + scale overhead ~1 byte effective
+            return self.BYTES_PER_Q8_0
         else:  # q4_0, nf4
-            return 0.5 + 0.125  # 4-bit + scale overhead
+            return self.BYTES_PER_Q4_0
 
     def _estimate_model_kvcache_bytes(
         self,
@@ -447,14 +461,15 @@ class Upcycle:
         )
 
     def _get_diffusion_loss_weight(self) -> float:
-        """Get the diffusion loss weight from config."""
-        if hasattr(self.student, "config"):
-            cfg = getattr(self.student, "config", None)
-            if cfg is not None and hasattr(cfg, "diffusion_head"):
-                dh_cfg = getattr(cfg, "diffusion_head", None)
-                if dh_cfg is not None and hasattr(dh_cfg, "loss_weight"):
-                    return float(getattr(dh_cfg, "loss_weight", 0.10))
-        return 0.10  # Default weight
+        """Get the diffusion loss weight from config.
+
+        Returns:
+            The configured loss_weight or 0.10 as default if not accessible.
+        """
+        try:
+            return float(self.student.config.diffusion_head.loss_weight)  # type: ignore[union-attr]
+        except (AttributeError, TypeError, ValueError):
+            return 0.10  # Default weight
 
     def resolve_teacher_ckpt(self, ckpt: str) -> Path:
         """Resolve a local path or hf:// URI."""

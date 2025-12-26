@@ -174,12 +174,9 @@ class DistributedContext:
             init_method = ctx.config.init_method
 
             # Auto-detect init method from environment
+            # Both with and without MASTER_ADDR, we use "env://" as torchrun sets it
             if init_method is None:
-                if "MASTER_ADDR" in os.environ:
-                    init_method = "env://"
-                else:
-                    # Single-node multi-GPU with torchrun
-                    init_method = "env://"
+                init_method = "env://"
 
             dist.init_process_group(backend=backend, init_method=init_method)
 
@@ -325,11 +322,11 @@ class DistributedContext:
             # Use transformer-specific wrapping
             layer_classes: set[type[nn.Module]] = set()
             for cls_name in self.config.fsdp_transformer_layer_cls:
-                # Try to resolve class name
+                # Try to resolve class name - collect all matching module types
                 for _name, module in model.named_modules():
                     if type(module).__name__ == cls_name:
                         layer_classes.add(type(module))
-                        break
+                        # Don't break - continue to find all matching types
 
             if layer_classes:
                 auto_wrap_policy = partial(
@@ -507,11 +504,40 @@ class DistributedContext:
         if only_main and not self.is_main:
             return
 
-        # For FSDP, need special handling
+        # For FSDP, need special handling to gather full state
         if self.config.strategy == DistributedStrategy.FSDP:
-            # FSDP requires all ranks to participate in state_dict
-            # This is handled by FSDP.full_state_dict() or FSDP.state_dict()
-            pass
+            try:
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+
+                # Check if 'model' key contains an FSDP-wrapped module
+                if 'model' in state and isinstance(state['model'], FSDP):
+                    fsdp_model = state['model']
+                    # Use full state dict for single-file checkpoint
+                    full_state_dict_config = FullStateDictConfig(
+                        offload_to_cpu=True,
+                        rank0_only=True,
+                    )
+                    with FSDP.state_dict_type(
+                        fsdp_model,
+                        StateDictType.FULL_STATE_DICT,
+                        full_state_dict_config,
+                    ):
+                        state['model'] = fsdp_model.state_dict()
+
+                # Synchronize all ranks before saving
+                self.barrier()
+
+                # Only rank 0 saves the checkpoint
+                if self.is_main:
+                    torch.save(state, path)
+
+                # Synchronize after save
+                self.barrier()
+                return
+            except ImportError:
+                # Fall back to regular save if FSDP imports fail
+                pass
 
         torch.save(state, path)
 

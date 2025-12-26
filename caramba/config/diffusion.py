@@ -78,7 +78,7 @@ class DiffusionHeadConfig(Config):
         )
 
 
-def NoDiffusionHeadConfig() -> DiffusionHeadConfig:
+def no_diffusion_head_config() -> DiffusionHeadConfig:
     """Factory function that returns a disabled DiffusionHeadConfig.
 
     Used as a default_factory in ModelConfig to provide a disabled

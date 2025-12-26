@@ -16,6 +16,9 @@ from caramba.layer.diffusion_head import (
     DiffusionHeadConfig as RuntimeDiffusionConfig,
 )
 
+# Type alias for runtime diffusion config return type
+RuntimeDiffusionConfigType = RuntimeDiffusionConfig
+
 
 class Model(nn.Module):
     """
@@ -48,10 +51,13 @@ class Model(nn.Module):
                     "Install with: pip install diffusers"
                 )
             # Convert pydantic config to runtime dataclass
-            runtime_cfg_obj = config.diffusion_head.to_runtime_config()
-            # Cast to the expected type
-            from typing import cast
-            runtime_cfg = cast(RuntimeDiffusionConfig, runtime_cfg_obj)
+            # The to_runtime_config() method returns RuntimeDiffusionConfig
+            runtime_cfg = config.diffusion_head.to_runtime_config()
+            # Verify it's the expected type at runtime (no cast needed)
+            if not isinstance(runtime_cfg, RuntimeDiffusionConfig):
+                raise TypeError(
+                    f"Expected RuntimeDiffusionConfig, got {type(runtime_cfg).__name__}"
+                )
             # Get embed_dim from embedder config
             embed_dim = self._get_embed_dim()
             self.diffusion_head = DiffusionNextTokenHead(
@@ -97,17 +103,22 @@ class Model(nn.Module):
             logits = self._features_to_logits(features)
             return features, logits
 
-        return features
+        # Default path: return vocabulary logits (as documented)
+        return self._features_to_logits(features)
 
     def _features_to_logits(self, features: Tensor) -> Tensor:
-        """Convert hidden features to vocabulary logits via tied embeddings.
+        """Convert hidden features to vocabulary logits.
 
         Args:
-            features: Hidden states (B, T, d_model)
+            features: Hidden states (B, T, d_model) or logits (B, T, vocab_size)
+                     depending on whether topology includes an LM head.
 
         Returns:
             Logits (B, T, vocab_size)
         """
+        # If tied_embeddings is disabled, topology already includes LM head
+        if not self.config.tied_embeddings:
+            return features
         if self.embedder.token_embedding is None:
             # No tied embedding - features are already logits
             return features

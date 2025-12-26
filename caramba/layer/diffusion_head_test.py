@@ -168,7 +168,10 @@ class TestDiffusionNextTokenHead:
 
     def test_cfg_dropout_during_training(self, head: DiffusionNextTokenHead) -> None:
         """Test that CFG dropout is applied during training."""
-        batch_size = 100  # Large batch to statistically see dropout
+        # Use a fixed seed for deterministic behavior
+        torch.manual_seed(42)
+
+        batch_size = 1000  # Large batch for statistical reliability
         seq_len = 4
         embed_dim = 128
 
@@ -178,10 +181,13 @@ class TestDiffusionNextTokenHead:
         # Check that _maybe_drop_cond drops some conditioning
         dropped = head._maybe_drop_cond(cond)
 
-        # Some samples should be zeroed (with p=0.1, expect ~10 zeros)
-        zero_samples = (dropped.sum(dim=(1, 2)) == 0).sum()
-        assert zero_samples > 0, "Expected some samples to be dropped"
-        assert zero_samples < batch_size, "Expected some samples to remain"
+        # Some samples should be zeroed (with p=0.1, expect ~100 zeros)
+        # Use a confidence interval to avoid flaky tests
+        zero_samples = (dropped.sum(dim=(1, 2)) == 0).sum().item()
+        # With p=0.1 and n=1000, expected=100, std=sqrt(1000*0.1*0.9)≈9.5
+        # Using 4-sigma bounds: [100 - 38, 100 + 38] = [62, 138]
+        assert zero_samples >= 30, f"Expected at least 30 dropped samples, got {zero_samples}"
+        assert zero_samples <= 200, f"Expected at most 200 dropped samples, got {zero_samples}"
 
     def test_cfg_dropout_not_applied_during_eval(
         self, head: DiffusionNextTokenHead

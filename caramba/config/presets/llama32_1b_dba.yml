@@ -56,6 +56,7 @@ defaults:
 
 model:
   type: TransformerModel
+  tied_embeddings: false
   embedder:
     type: token
     vocab_size: "${vocab_size}"
@@ -151,7 +152,8 @@ groups:
           phase: global
         verify:
           type: eval
-          tokenizer: llama
+          tokenizer:
+            type: llama
           max_new_tokens: 32
           thresholds:
             min_student_accuracy: 0.7

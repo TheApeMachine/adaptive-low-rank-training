@@ -48,12 +48,21 @@ class ComparisonSummary:
     student_tokens_per_sec: float
     speedup: float
 
-    # Memory (per-token KV-cache size in MB)
-    # These are per-token values converted to MB for readability.
-    # Multiply by sequence length to get total KV-cache size.
-    teacher_kvcache_mb_per_token: float
-    student_kvcache_mb_per_token: float
+    # Memory (per-token KV-cache size)
+    # Raw bytes per token - used for precise comparisons and LaTeX output
+    teacher_kvcache_bytes_per_token: float
+    student_kvcache_bytes_per_token: float
     memory_reduction: float  # Ratio of teacher/student bytes per token
+
+    @property
+    def teacher_kvcache_mb_per_token(self) -> float:
+        """Teacher KV-cache size in MB per token (for display purposes)."""
+        return self.teacher_kvcache_bytes_per_token / (1024 * 1024)
+
+    @property
+    def student_kvcache_mb_per_token(self) -> float:
+        """Student KV-cache size in MB per token (for display purposes)."""
+        return self.student_kvcache_bytes_per_token / (1024 * 1024)
 
 
 class ArtifactGenerator:
@@ -146,8 +155,9 @@ class ArtifactGenerator:
             teacher_tokens_per_sec=t_tps,
             student_tokens_per_sec=s_tps,
             speedup=s_tps / t_tps if t_tps > 0 else 0.0,
-            teacher_kvcache_mb_per_token=t_mem / (1024 * 1024) if t_mem else 0.0,
-            student_kvcache_mb_per_token=s_mem / (1024 * 1024) if s_mem else 0.0,
+            # Store raw bytes per token directly from the analysis
+            teacher_kvcache_bytes_per_token=t_mem if t_mem else 0.0,
+            student_kvcache_bytes_per_token=s_mem if s_mem else 0.0,
             memory_reduction=t_mem / s_mem if s_mem > 0 else 0.0,
         )
 
@@ -396,7 +406,7 @@ class ArtifactGenerator:
 \\midrule
 Perplexity $\\downarrow$ & {summary.teacher_perplexity:.2f} & {summary.student_perplexity:.2f} & {summary.perplexity_ratio:.2f}$\\times$ \\\\
 Throughput (tok/s) $\\uparrow$ & {summary.teacher_tokens_per_sec:.0f} & {summary.student_tokens_per_sec:.0f} & {summary.speedup:.2f}$\\times$ \\\\
-KV-Cache (bytes/tok) $\\downarrow$ & {summary.teacher_kvcache_mb_per_token * 1024 * 1024:.0f} & {summary.student_kvcache_mb_per_token * 1024 * 1024:.0f} & {summary.memory_reduction:.1f}$\\times$ \\\\
+KV-Cache (bytes/tok) $\\downarrow$ & {summary.teacher_kvcache_bytes_per_token:.0f} & {summary.student_kvcache_bytes_per_token:.0f} & {summary.memory_reduction:.1f}$\\times$ \\\\
 \\bottomrule
 \\end{{tabular}}
 \\end{{table}}

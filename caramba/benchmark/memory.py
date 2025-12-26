@@ -4,13 +4,17 @@ memory provides memory profiling for language models.
 from __future__ import annotations
 
 import gc
+import logging
 from dataclasses import dataclass, field
 
 import torch
 from torch import nn
 
+from caramba.benchmark.utils import get_model_vocab_size
 from caramba.config.benchmark import MemoryBenchmarkConfig
 from caramba.layer.attention import AttentionLayer, AttentionMode
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -146,9 +150,22 @@ class MemoryBenchmark:
                         )
 
         # Use defaults if no attention layers found
-        n_kv_heads = n_kv_heads or 0
-        head_dim = head_dim or 0
-        attention_mode = attention_mode or "standard"
+        used_defaults = []
+        if n_kv_heads is None:
+            n_kv_heads = 0
+            used_defaults.append("n_kv_heads=0")
+        if head_dim is None:
+            head_dim = 0
+            used_defaults.append("head_dim=0")
+        if attention_mode is None:
+            attention_mode = "standard"
+            used_defaults.append("attention_mode='standard'")
+
+        if n_layers == 0 or used_defaults:
+            logger.warning(
+                "No attention layers detected; using defaults: %s",
+                ", ".join(used_defaults) if used_defaults else "n_layers=0"
+            )
 
         # Calculate bytes per token
         # Standard: 2 * n_layers * n_kv_heads * head_dim * dtype_size (K and V)
@@ -277,15 +294,4 @@ class MemoryBenchmark:
 
     def _get_vocab_size(self, model: nn.Module) -> int:
         """Get vocab size from model, with fallback to default."""
-        # Try common config attributes
-        if hasattr(model, "config") and hasattr(model.config, "vocab_size"):  # type: ignore[union-attr]
-            return int(model.config.vocab_size)  # type: ignore[union-attr]
-
-        # Try getting from embedding layer
-        if hasattr(model, "get_input_embeddings"):
-            embedding = model.get_input_embeddings()  # type: ignore[operator]
-            if embedding is not None and hasattr(embedding, "num_embeddings"):
-                return int(embedding.num_embeddings)  # type: ignore[union-attr]
-
-        # Fallback to a reasonable default
-        return 32000
+        return get_model_vocab_size(model, default=32000)

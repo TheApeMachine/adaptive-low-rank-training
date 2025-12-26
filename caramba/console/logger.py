@@ -39,7 +39,11 @@ class Logger:
 
     def inspect(self, obj: object, **kwargs: Any) -> None:
         """
-        inspect produces a rich report on an object using Rich's inspect.
+        Print an object using the Rich Console's print method.
+
+        Delegates to self.console.print() which provides rich formatting
+        for supported object types. Accepts any keyword arguments supported
+        by Rich's Console.print() method (e.g., style, highlight, etc.).
         """
         self.console.print(obj, **kwargs)
 

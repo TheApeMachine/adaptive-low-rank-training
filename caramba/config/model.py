@@ -40,8 +40,11 @@ class ModelConfig(Config):
         embedder: Embedding layer configuration
         topology: Network topology configuration
         diffusion_head: Optional diffusion next-token head configuration
+        tied_embeddings: Whether to use tied embeddings (embed weight as LM head).
+                        Set to False when topology includes a separate LM head layer.
     """
     type: ModelType
     embedder: EmbedderConfig = Field(default_factory=NoEmbedderConfig)
     topology: TopologyConfig
     diffusion_head: DiffusionHeadConfig = Field(default_factory=DiffusionHeadConfig)
+    tied_embeddings: bool = True

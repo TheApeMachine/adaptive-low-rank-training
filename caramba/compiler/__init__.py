@@ -19,18 +19,23 @@ class Compiler:
     """
     Compiler provides a pipeline for compiling manifests.
 
-    The compile pipeline consists of three stages:
+    The compile pipeline consists of two stages:
     1. Lower: Expand repeats and transform configs to canonical form
     2. Validate: Check cross-layer shape invariants and constraints
-    3. Plan: Generate the execution plan
+
+    The planner is available as a separate component for generating execution plans
+    after compilation if needed.
 
     Usage:
         compiler = Compiler()
         manifest = compiler.compile(Manifest.from_path("path/to/manifest.yml"))
+
+        # To generate an execution plan after compilation:
+        # plan = compiler.planner.format(manifest)
+
         # Or use components directly:
         # manifest = compiler.lowerer.lower_manifest(raw_manifest)
         # compiler.validator.validate_manifest(manifest)
-        # plan = compiler.planner.format(manifest)
     """
 
     lowerer: Lowerer
@@ -55,8 +60,6 @@ class Compiler:
         Raises:
             ValueError: If validation fails.
         """
-        from caramba.config.manifest import Manifest
-
         lowered = self.lowerer.lower_manifest(manifest)
         self.validator.validate_manifest(lowered)
         return lowered

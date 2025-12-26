@@ -49,7 +49,9 @@ class ModelTest(unittest.TestCase):
         )
 
         x: torch.Tensor = torch.randint(0, 32, (2, 4))
-        self.assertEqual(model(x).shape, (2, 4, d_model))
+        # Output shape is (batch, seq, vocab_size) since forward returns logits
+        vocab_size = 32
+        self.assertEqual(model(x).shape, (2, 4, vocab_size))
 
     def test_forward_with_no_embedder(self) -> None:
         """

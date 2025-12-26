@@ -111,10 +111,14 @@ class ExperimentRunner:
         # Get output formats from manifest, with default fallback
         default_formats = ["csv", "json", "png", "latex"]
         output_formats = getattr(self.manifest, "output_formats", None)
-        if output_formats is None:
-            output_formats = default_formats
-        elif not isinstance(output_formats, list) or not all(isinstance(f, str) for f in output_formats):
-            logger.warning("Invalid output_formats in manifest, using defaults")
+        if (
+            output_formats is None
+            or not isinstance(output_formats, list)
+            or not output_formats  # Empty list is invalid
+            or not all(isinstance(f, str) for f in output_formats)
+        ):
+            if output_formats is not None:
+                logger.warning("Invalid or empty output_formats in manifest, using defaults")
             output_formats = default_formats
 
         # Build benchmark suite

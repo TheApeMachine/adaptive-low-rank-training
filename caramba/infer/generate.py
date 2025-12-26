@@ -53,10 +53,7 @@ def has_diffusion_head(model: nn.Module) -> bool:
     Returns:
         True if the model has a diffusion head attribute that is not None
     """
-    return (
-        hasattr(model, "diffusion_head")
-        and getattr(model, "diffusion_head", None) is not None
-    )
+    return getattr(model, "diffusion_head", None) is not None
 
 
 def get_attention_configs(model: nn.Module) -> list[AttentionLayerConfig]:
@@ -342,6 +339,44 @@ class Generator:
         self._ctx = InferContext(caches=self._caches)
         self._pos = 0
 
+    def _forward_with_features(
+        self,
+        tokens: Tensor,
+        use_diffusion: bool,
+    ) -> tuple[Tensor, Tensor | None]:
+        """Run forward pass with optional diffusion feature extraction.
+
+        Args:
+            tokens: Input token ids
+            use_diffusion: Whether to attempt extracting features for diffusion
+
+        Returns:
+            Tuple of (hidden_states, features_or_none) where features is set
+            when diffusion is requested and the model supports return_features.
+        """
+        assert self._ctx is not None
+
+        if use_diffusion and hasattr(self.model, "forward"):
+            try:
+                result = self.model(tokens, ctx=self._ctx, return_features=True)  # type: ignore[call-arg]
+                if isinstance(result, tuple) and len(result) == 2:
+                    # Model returned (features, logits)
+                    features = result[0]
+                    hidden = result[0]  # Use features for diffusion
+                    return hidden, features
+                else:
+                    hidden = result if isinstance(result, Tensor) else result[0]  # type: ignore[index]
+                    return hidden, None
+            except TypeError:
+                # Model doesn't support return_features
+                result2 = self.model(tokens, ctx=self._ctx)  # type: ignore[call-arg]
+                hidden = result2 if isinstance(result2, Tensor) else result2[0]  # type: ignore[index]
+                return hidden, None
+        else:
+            result3 = self.model(tokens, ctx=self._ctx)  # type: ignore[call-arg]
+            hidden = result3 if isinstance(result3, Tensor) else result3[0]  # type: ignore[index]
+            return hidden, None
+
     @torch.inference_mode()
     def prefill(self, input_ids: Tensor) -> Tensor:
         """Prefill the cache with input tokens.
@@ -360,25 +395,7 @@ class Generator:
 
         # Use return_features path if we need diffusion sampling
         use_diffusion = self.config.use_diffusion and self._has_diffusion
-        hidden: Tensor
-        if use_diffusion and hasattr(self.model, "forward"):
-            try:
-                result = self.model(input_ids, ctx=self._ctx, return_features=True)  # type: ignore[call-arg]
-                if isinstance(result, tuple) and len(result) == 2:
-                    self._last_features = result[0]
-                    hidden = result[0]  # Use features for diffusion
-                else:
-                    hidden = result if isinstance(result, Tensor) else result[0]  # type: ignore[index]
-                    self._last_features = None
-            except TypeError:
-                # Model doesn't support return_features
-                result2 = self.model(input_ids, ctx=self._ctx)  # type: ignore[call-arg]
-                hidden = result2 if isinstance(result2, Tensor) else result2[0]  # type: ignore[index]
-                self._last_features = None
-        else:
-            result3 = self.model(input_ids, ctx=self._ctx)  # type: ignore[call-arg]
-            hidden = result3 if isinstance(result3, Tensor) else result3[0]  # type: ignore[index]
-            self._last_features = None
+        hidden, self._last_features = self._forward_with_features(input_ids, use_diffusion)
 
         self._ctx.ensure_consumed()
         self._pos = input_ids.size(1)
@@ -434,24 +451,7 @@ class Generator:
 
         # Use return_features path if we need diffusion sampling
         use_diffusion = self.config.use_diffusion and self._has_diffusion
-        hidden: Tensor
-        if use_diffusion and hasattr(self.model, "forward"):
-            try:
-                result = self.model(token_ids, ctx=self._ctx, return_features=True)  # type: ignore[call-arg]
-                if isinstance(result, tuple) and len(result) == 2:
-                    self._last_features = result[0]
-                    hidden = result[0]
-                else:
-                    hidden = result if isinstance(result, Tensor) else result[0]  # type: ignore[index]
-                    self._last_features = None
-            except TypeError:
-                result2 = self.model(token_ids, ctx=self._ctx)  # type: ignore[call-arg]
-                hidden = result2 if isinstance(result2, Tensor) else result2[0]  # type: ignore[index]
-                self._last_features = None
-        else:
-            result3 = self.model(token_ids, ctx=self._ctx)  # type: ignore[call-arg]
-            hidden = result3 if isinstance(result3, Tensor) else result3[0]  # type: ignore[index]
-            self._last_features = None
+        hidden, self._last_features = self._forward_with_features(token_ids, use_diffusion)
 
         self._ctx.ensure_consumed()
         self._pos += token_ids.size(1)

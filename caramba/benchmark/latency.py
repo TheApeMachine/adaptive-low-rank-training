@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 import torch
 from torch import nn
 
+from caramba.benchmark.utils import get_model_vocab_size
 from caramba.config.benchmark import LatencyBenchmarkConfig
 
 
@@ -170,15 +171,4 @@ class LatencyBenchmark:
 
     def _get_vocab_size(self, model: nn.Module) -> int:
         """Get vocab size from model, with fallback to default."""
-        # Try common config attributes
-        if hasattr(model, "config") and hasattr(model.config, "vocab_size"):  # type: ignore[union-attr]
-            return int(model.config.vocab_size)  # type: ignore[union-attr]
-
-        # Try getting from embedding layer
-        if hasattr(model, "get_input_embeddings"):
-            embedding = model.get_input_embeddings()  # type: ignore[operator]
-            if embedding is not None and hasattr(embedding, "num_embeddings"):
-                return int(embedding.num_embeddings)  # type: ignore[union-attr]
-
-        # Fallback to a reasonable default
-        return 32000
+        return get_model_vocab_size(model, default=32000)

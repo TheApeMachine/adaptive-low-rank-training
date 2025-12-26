@@ -18,13 +18,19 @@ class TiktokenTokenizerConfig(BaseModel):
     encoding: str
 
 
-# TokenizerConfig is currently a single-variant union.
-# Using Annotated with discriminator allows future extension to support
-# multiple tokenizer backends (e.g., HuggingFace, SentencePiece) without
-# breaking existing configs. To extend, add new tokenizer config classes
-# with distinct "type" literals and include them in the union below.
+class LlamaTokenizerConfig(BaseModel):
+    """
+    LlamaTokenizerConfig configures a Llama/HuggingFace tokenizer.
+    """
+    type: Literal["llama"] = "llama"
+    model_id: str = "meta-llama/Llama-3.2-1B"
+
+
+# TokenizerConfig is a union of supported tokenizer backends.
+# Using Annotated with discriminator allows extension to support
+# multiple tokenizer backends without breaking existing configs.
 TokenizerConfig = Annotated[
-    TiktokenTokenizerConfig,
+    TiktokenTokenizerConfig | LlamaTokenizerConfig,
     Field(discriminator="type"),
 ]
 

@@ -69,19 +69,26 @@ def sampling_probs(
     top_k: int | None,
     eps: float = 1e-8,
 ) -> Tensor:
-    """Compute sampling probabilities with temperature and top-k."""
+    """Compute sampling probabilities with temperature and top-k.
+
+    Note: This function creates a copy of the logits tensor to avoid
+    mutating the input in-place, which could cause side effects for callers.
+    """
     if temperature <= 0:
         # Greedy: one-hot on argmax
         idx = logits.argmax(dim=-1, keepdim=True)
         return torch.zeros_like(logits).scatter_(-1, idx, 1.0)
 
-    logits = logits / temperature
+    # Create a copy to avoid mutating the input tensor
+    scaled_logits = logits / temperature
 
     if top_k is not None and top_k > 0:
-        v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-        logits[logits < v[:, [-1]]] = float("-inf")
+        v, _ = torch.topk(scaled_logits, min(top_k, scaled_logits.size(-1)))
+        # Create a new tensor with masking applied (no in-place modification)
+        mask = scaled_logits < v[:, [-1]]
+        scaled_logits = scaled_logits.masked_fill(mask, float("-inf"))
 
-    p = torch.softmax(logits, dim=-1)
+    p = torch.softmax(scaled_logits, dim=-1)
     p_sum = p.sum(dim=-1, keepdim=True)
     return p / p_sum.clamp_min(float(eps))
 
@@ -111,6 +118,10 @@ def verify_speculative(
 ) -> tuple[int, Tensor]:
     """Parallel verification for speculative decoding (rejection sampling).
 
+    This implementation handles batch size B=1. For B>1, each batch element
+    would need independent acceptance tracking. The current implementation
+    uses the minimum accepted count across the batch for simplicity.
+
     Args:
         main_next: Main model logits for the position before proposed tokens (B, V)
         main_block: Main model logits for proposed positions (B, K, V)
@@ -122,10 +133,20 @@ def verify_speculative(
 
     Returns:
         Tuple of (num_accepted, next_token)
-        - num_accepted: Number of accepted tokens (0 to K)
+        - num_accepted: Minimum number of accepted tokens across batch (0 to K)
         - next_token: The next token to append (B, 1)
     """
+    B = proposed.size(0)
     k = proposed.size(1)
+    device = proposed.device
+
+    # Track per-batch acceptance status
+    # accepted_mask[b] = True means batch element b is still accepting tokens
+    accepted_mask = torch.ones(B, dtype=torch.bool, device=device)
+    # Track the position where each batch element was rejected (-1 means all accepted so far)
+    reject_pos = torch.full((B,), k, dtype=torch.long, device=device)
+    # Store the next token for each batch element
+    next_tokens = torch.zeros((B, 1), dtype=torch.long, device=device)
 
     for i in range(k):
         # Get main model distribution for the current step
@@ -138,26 +159,43 @@ def verify_speculative(
 
         # Acceptance probability: p(x)/q(x)
         token = proposed[:, i:i + 1]
-        p_tok = p.gather(-1, token)
-        q_tok = q.gather(-1, token).clamp_min(float(eps))
+        p_tok = p.gather(-1, token).squeeze(-1)  # (B,)
+        q_tok = q.gather(-1, token).squeeze(-1).clamp_min(float(eps))  # (B,)
 
-        # Rejection check
-        if torch.rand_like(p_tok) > (p_tok / q_tok).clamp(max=1.0):
-            # Rejected: sample from normalized difference: norm(max(0, p - q))
+        # Per-batch rejection check
+        accept_ratio = (p_tok / q_tok).clamp(max=1.0)
+        rand_vals = torch.rand_like(accept_ratio)
+        rejected_now = (rand_vals > accept_ratio) & accepted_mask
+
+        if rejected_now.any():
+            # For rejected batch elements, sample from normalized difference
             diff = (p - q).clamp(min=0)
-            diff_sum = diff.sum(dim=-1, keepdim=True)
-            ok = torch.isfinite(diff_sum) & (diff_sum > float(eps))
-            if not bool(ok.all()):
-                next_tok = torch.multinomial(p, 1)
-            else:
-                next_tok = torch.multinomial(diff / diff_sum, 1)
-            return i, next_tok
+            diff_sum = diff.sum(dim=-1, keepdim=True)  # (B, 1)
+            valid_diff = torch.isfinite(diff_sum.squeeze(-1)) & (diff_sum.squeeze(-1) > float(eps))
 
-    # All accepted: sample the next token from the final main distribution
-    p_final = sampling_probs(main_block[:, -1, :], temperature=temperature, top_k=top_k, eps=eps)
-    if temperature <= 0:
-        return k, p_final.argmax(dim=-1, keepdim=True)
-    return k, torch.multinomial(p_final, 1)
+            for b in range(B):
+                if rejected_now[b]:
+                    reject_pos[b] = i
+                    accepted_mask[b] = False
+                    if valid_diff[b]:
+                        next_tokens[b] = torch.multinomial(diff[b:b+1] / diff_sum[b:b+1], 1)
+                    else:
+                        next_tokens[b] = torch.multinomial(p[b:b+1], 1)
+
+    # For batch elements that accepted all tokens, sample from final distribution
+    all_accepted_mask = accepted_mask
+    if all_accepted_mask.any():
+        p_final = sampling_probs(main_block[:, -1, :], temperature=temperature, top_k=top_k, eps=eps)
+        if temperature <= 0:
+            final_tokens = p_final.argmax(dim=-1, keepdim=True)
+        else:
+            final_tokens = torch.multinomial(p_final, 1)
+        next_tokens[all_accepted_mask] = final_tokens[all_accepted_mask]
+
+    # Return the minimum accepted count across the batch for compatibility
+    # with the existing interface that expects a single count
+    num_accepted = int(reject_pos.min().item())
+    return num_accepted, next_tokens
 
 
 class SpeculativeGenerator:
